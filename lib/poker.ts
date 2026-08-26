@@ -126,6 +126,11 @@ function requireResponsesToShortRaise(state: RoomState, playerId: string) {
   state.pending = state.players.filter((candidate) => waiting.has(candidate.id)).map((candidate) => candidate.id);
 }
 
+function minimumRaiseTarget(state: RoomState) {
+  const minimum = state.currentBet > 0 ? state.currentBet * 2 : state.bigBlind;
+  return Math.ceil(minimum / state.bigBlind) * state.bigBlind;
+}
+
 function cleanupLeavingPlayers(state: RoomState) {
   const previousDealerId = state.players[state.dealerIndex]?.id;
   state.players = state.players.filter((player) => !player.leaving);
@@ -362,17 +367,19 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
   } else if (kind === 'call') {
     commitChips(state, index, toCall);
   } else if (kind === 'raise') {
-    const target = Math.floor(Number(amount));
+    const target = Number(amount);
     const maxTarget = player.bet + player.stack;
+    const minimumTarget = minimumRaiseTarget(state);
     if (!canRaise) throw new Error('本轮下注未重新开放，只能跟注或弃牌');
-    if (!Number.isFinite(target) || target <= state.currentBet || target > maxTarget) throw new Error('加注额无效');
-    if (target < state.currentBet + state.minRaise && target < maxTarget) throw new Error(`最少加注到 ${state.currentBet + state.minRaise}`);
-    const previousBet = state.currentBet;
+    if (!Number.isInteger(target) || target <= state.currentBet || target > maxTarget) throw new Error('加注额无效');
+    const isAllIn = target === maxTarget;
+    if (!isAllIn && (target < minimumTarget || target % state.bigBlind !== 0)) {
+      throw new Error(`加注需至少到 ${minimumTarget}，且为大盲 ${state.bigBlind} 的整数倍`);
+    }
     commitChips(state, index, target - player.bet);
     state.currentBet = player.bet;
-    const raiseSize = state.currentBet - previousBet;
-    if (raiseSize >= state.minRaise) {
-      state.minRaise = raiseSize;
+    if (state.currentBet >= minimumTarget) {
+      state.minRaise = state.currentBet;
       reopenAfterRaise(state, player.id);
     } else {
       requireResponsesToShortRaise(state, player.id);
@@ -380,13 +387,13 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
   } else if (kind === 'allin') {
     const target = player.bet + player.stack;
     const previousBet = state.currentBet;
+    const minimumTarget = minimumRaiseTarget(state);
     if (target > previousBet && !canRaise) throw new Error('本轮下注未重新开放，只能跟注或弃牌');
     commitChips(state, index, player.stack);
     if (target > previousBet) {
-      const raiseSize = target - previousBet;
       state.currentBet = target;
-      if (raiseSize >= state.minRaise) {
-        state.minRaise = raiseSize;
+      if (state.currentBet >= minimumTarget) {
+        state.minRaise = state.currentBet;
         reopenAfterRaise(state, player.id);
       } else {
         requireResponsesToShortRaise(state, player.id);
