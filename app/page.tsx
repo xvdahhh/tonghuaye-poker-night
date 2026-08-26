@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import type { ActionKind, ClientPlayer, ClientRoom } from '@/lib/types';
+import { reconcileSeatOrder, seatOrderForPlayers } from '@/lib/seats';
 
 const SUITS: Record<string, string> = { s: '♠', h: '♥', d: '♦', c: '♣' };
 
@@ -99,14 +100,31 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
   toast: (message: string) => void;
 }) {
   const me = room.players.find((player) => player.id === room.meId)!;
-  const myIndex = room.players.findIndex((player) => player.id === room.meId);
-  const orderedPlayers = useMemo(() => [...room.players.slice(myIndex), ...room.players.slice(0, myIndex)], [room.players, myIndex]);
+  const playerIdSignature = room.players.map((player) => player.id).sort().join('|');
+  const [seatOrder, setSeatOrder] = useState(() => seatOrderForPlayers(room.players, room.meId));
+  const orderedPlayers = useMemo(() => {
+    const playersById = new Map(room.players.map((player) => [player.id, player]));
+    const seated = seatOrder.flatMap((id) => {
+      const player = playersById.get(id);
+      return player ? [player] : [];
+    });
+    const knownIds = new Set(seatOrder);
+    return [...seated, ...room.players.filter((player) => !knownIds.has(player.id))];
+  }, [room.players, seatOrder]);
   const isHost = room.hostId === room.meId;
   const isTurn = room.players[room.actorIndex]?.id === room.meId;
   const fundedPlayers = room.players.filter((player) => player.stack > 0).length;
   const toCall = Math.max(0, room.currentBet - me.bet);
   const minTarget = Math.min(me.bet + me.stack, room.currentBet + room.minRaise);
   const [raiseTarget, setRaiseTarget] = useState(minTarget);
+
+  useEffect(() => {
+    setSeatOrder((current) => {
+      const next = reconcileSeatOrder(current, room.players, room.meId);
+      const unchanged = next.length === current.length && next.every((id, index) => id === current[index]);
+      return unchanged ? current : next;
+    });
+  }, [room.code, room.meId, playerIdSignature]);
 
   useEffect(() => setRaiseTarget(minTarget), [minTarget, room.version]);
   useEffect(() => {
