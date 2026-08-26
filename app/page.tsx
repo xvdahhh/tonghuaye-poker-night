@@ -5,6 +5,7 @@ import type { ActionKind, ClientPlayer, ClientRoom } from '@/lib/types';
 import { reconcileSeatOrder, rotateSeatOrderForHand, seatOrderForPlayers } from '@/lib/seats';
 
 const SUITS: Record<string, string> = { s: '♠', h: '♥', d: '♦', c: '♣' };
+const RAISE_UNIT = 10;
 
 function Card({ value, small = false }: { value: string; small?: boolean }) {
   if (value === 'XX') return <span className={`playing-card back ${small ? 'small' : ''}`} aria-label="暗牌" />;
@@ -119,14 +120,14 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
   const canRaise = room.raiseRights?.includes(me.id) ?? room.pending.includes(me.id);
   const maximumTarget = me.bet + me.stack;
   const rawMinimumTarget = room.currentBet > 0 ? room.currentBet * 2 : room.bigBlind;
-  const legalMinimumTarget = Math.ceil(rawMinimumTarget / room.bigBlind) * room.bigBlind;
+  const legalMinimumTarget = Math.ceil(rawMinimumTarget / RAISE_UNIT) * RAISE_UNIT;
   const minTarget = Math.min(maximumTarget, legalMinimumTarget);
   const [raiseTarget, setRaiseTarget] = useState(minTarget);
   const raiseIsAllIn = raiseTarget === maximumTarget;
   const validRaiseTarget = Number.isInteger(raiseTarget)
     && raiseTarget > room.currentBet
     && raiseTarget <= maximumTarget
-    && (raiseIsAllIn || (raiseTarget >= legalMinimumTarget && raiseTarget % room.bigBlind === 0));
+    && (raiseIsAllIn || (raiseTarget >= legalMinimumTarget && raiseTarget % RAISE_UNIT === 0));
 
   useEffect(() => {
     const lastHandNo = previousHandNo.current;
@@ -208,7 +209,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
             <button disabled={busy} className="fold-button" onClick={() => onAction('fold')}>弃牌 <kbd>F</kbd></button>
             <button disabled={busy} onClick={() => onAction(toCall ? 'call' : 'check')}>{toCall ? `跟注 ${Math.min(toCall, me.stack)}` : '过牌'} <kbd>C</kbd></button>
             {me.stack > toCall && canRaise && <div className="raise-control">
-              <input aria-label="加注到" type="number" min={minTarget} max={maximumTarget} step={room.bigBlind} value={raiseTarget} onChange={(event) => setRaiseTarget(Number(event.target.value))} />
+              <input aria-label="加注到" type="number" min={minTarget} max={maximumTarget} step={RAISE_UNIT} value={raiseTarget} onChange={(event) => setRaiseTarget(Number(event.target.value))} />
               <button disabled={busy || !validRaiseTarget} className="raise-button" onClick={() => onAction('raise', raiseTarget)}>加注到 {raiseTarget}</button>
             </div>}
             <button disabled={busy || (me.stack > toCall && !canRaise)} className="allin-button" onClick={() => onAction('allin')}>全下 {me.stack}</button>
