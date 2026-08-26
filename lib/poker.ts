@@ -36,7 +36,7 @@ export function newRoom(code: string, name: string) {
   const state: RoomState = {
     code, phase: 'lobby', handNo: 0, hostId: player.id, players: [player], dealerIndex: -1,
     actorIndex: -1, deck: [], community: [], pot: 0, currentBet: 0, minRaise: 20,
-    smallBlind: 10, bigBlind: 20, pending: [], winners: [], message: '等待好友加入牌桌',
+    smallBlind: 10, bigBlind: 20, pending: [], raiseRights: [], winners: [], message: '等待好友加入牌桌',
   };
   return { state, player };
 }
@@ -70,6 +70,60 @@ function commitChips(state: RoomState, index: number, amount: number) {
   state.pot += paid;
   if (player.stack === 0) player.allIn = true;
   return paid;
+}
+
+function ensureRaiseRights(state: RoomState) {
+  if (!state.raiseRights) state.raiseRights = [...state.pending];
+  return state.raiseRights;
+}
+
+function refundUncalledBet(state: RoomState) {
+  const highest = Math.max(0, ...state.players.map((player) => player.bet));
+  const leaders = state.players.filter((player) => player.bet === highest);
+  if (highest === 0 || leaders.length !== 1) return 0;
+  const player = leaders[0];
+  if (player.folded) return 0;
+  const matched = Math.max(0, ...state.players.filter((candidate) => candidate.id !== player.id).map((candidate) => candidate.bet));
+  const returned = highest - matched;
+  player.bet -= returned;
+  player.totalBet -= returned;
+  player.stack += returned;
+  player.allIn = player.stack === 0;
+  state.pot -= returned;
+  return returned;
+}
+
+function refundLegacyUncalledTotal(state: RoomState) {
+  const highest = Math.max(0, ...state.players.map((player) => player.totalBet));
+  const leaders = state.players.filter((player) => player.totalBet === highest);
+  if (highest === 0 || leaders.length !== 1) return 0;
+  const player = leaders[0];
+  if (player.folded) return 0;
+  const matched = Math.max(0, ...state.players.filter((candidate) => candidate.id !== player.id).map((candidate) => candidate.totalBet));
+  const returned = highest - matched;
+  player.totalBet -= returned;
+  player.stack += returned;
+  player.allIn = player.stack === 0;
+  state.pot -= returned;
+  return returned;
+}
+
+function reopenAfterRaise(state: RoomState, playerId: string) {
+  const candidates = state.players
+    .filter((candidate) => candidate.id !== playerId && !candidate.folded && !candidate.allIn)
+    .map((candidate) => candidate.id);
+  state.pending = candidates;
+  state.raiseRights = [...candidates];
+}
+
+function requireResponsesToShortRaise(state: RoomState, playerId: string) {
+  const waiting = new Set(state.pending);
+  state.players.forEach((candidate) => {
+    if (candidate.id !== playerId && !candidate.folded && !candidate.allIn && candidate.bet < state.currentBet) {
+      waiting.add(candidate.id);
+    }
+  });
+  state.pending = state.players.filter((candidate) => waiting.has(candidate.id)).map((candidate) => candidate.id);
 }
 
 function cleanupLeavingPlayers(state: RoomState) {
@@ -120,6 +174,7 @@ export function startHand(state: RoomState) {
   commitChips(state, bigIndex, state.bigBlind);
   state.currentBet = Math.max(state.players[smallIndex].bet, state.players[bigIndex].bet);
   state.pending = state.players.filter((player) => !player.folded && !player.allIn).map((player) => player.id);
+  state.raiseRights = [...state.pending];
   state.actorIndex = nextIndex(state, bigIndex, (player) => state.pending.includes(player.id) && !player.allIn);
   state.message = `第 ${state.handNo} 手 · 翻牌前`;
   if (state.actorIndex < 0) runOut(state);
@@ -174,9 +229,11 @@ function bestHand(cards: string[]) {
 }
 
 function showdown(state: RoomState) {
+  refundLegacyUncalledTotal(state);
   state.phase = 'showdown';
   state.actorIndex = -1;
   state.pending = [];
+  state.raiseRights = [];
   const contenders = state.players.filter((player) => !player.folded);
   const ranks = new Map(contenders.map((player) => [player.id, bestHand([...player.hole, ...state.community])]));
   const levels = Array.from(new Set(state.players.map((player) => player.totalBet).filter(Boolean))).sort((a, b) => a - b);
@@ -187,16 +244,21 @@ function showdown(state: RoomState) {
     const eligible = contributors.filter((player) => !player.folded);
     const amount = (level - previous) * contributors.length;
     previous = level;
-    if (!eligible.length || !amount) continue;
-    let best = ranks.get(eligible[0].id)!;
-    eligible.slice(1).forEach((player) => {
+    const recipients = eligible.length ? eligible : contenders;
+    if (!recipients.length || !amount) continue;
+    let best = ranks.get(recipients[0].id)!;
+    recipients.slice(1).forEach((player) => {
       const rank = ranks.get(player.id)!;
       if (compareScore(rank.score, best.score) > 0) best = rank;
     });
-    const tied = eligible.filter((player) => compareScore(ranks.get(player.id)!.score, best.score) === 0);
+    const tied = recipients.filter((player) => compareScore(ranks.get(player.id)!.score, best.score) === 0);
     const share = Math.floor(amount / tied.length);
     let remainder = amount % tied.length;
-    tied.forEach((player) => {
+    const tiedIds = new Set(tied.map((player) => player.id));
+    const clockwise = Array.from({ length: state.players.length }, (_, offset) =>
+      state.players[(state.dealerIndex + offset + 1 + state.players.length) % state.players.length],
+    ).filter((player) => tiedIds.has(player.id));
+    clockwise.forEach((player) => {
       const extra = remainder > 0 ? 1 : 0;
       remainder -= extra;
       payouts.set(player.id, (payouts.get(player.id) ?? 0) + share + extra);
@@ -218,6 +280,7 @@ function uncontested(state: RoomState, winner: Player) {
   state.phase = 'showdown';
   state.actorIndex = -1;
   state.pending = [];
+  state.raiseRights = [];
   state.message = `${winner.name} 赢得 ${state.pot} 筹码`;
   cleanupLeavingPlayers(state);
 }
@@ -252,6 +315,7 @@ export function leaveRoom(state: RoomState, player: Player) {
   } else {
     player.folded = true;
     state.pending = state.pending.filter((id) => id !== player.id);
+    state.raiseRights = ensureRaiseRights(state).filter((id) => id !== player.id);
     const remaining = state.players.filter((candidate) => !candidate.folded);
     if (remaining.length === 1) uncontested(state, remaining[0]);
     else if (state.pending.length === 0) advanceStreet(state);
@@ -260,6 +324,7 @@ export function leaveRoom(state: RoomState, player: Player) {
 }
 
 function runOut(state: RoomState) {
+  refundUncalledBet(state);
   while (state.community.length < 5) {
     if (state.community.length === 0) state.community.push(state.deck.pop()!, state.deck.pop()!, state.deck.pop()!);
     else state.community.push(state.deck.pop()!);
@@ -268,6 +333,7 @@ function runOut(state: RoomState) {
 }
 
 function advanceStreet(state: RoomState) {
+  refundUncalledBet(state);
   state.players.forEach((player) => { player.bet = 0; });
   state.currentBet = 0;
   state.minRaise = state.bigBlind;
@@ -276,6 +342,7 @@ function advanceStreet(state: RoomState) {
   else if (state.phase === 'turn') { state.phase = 'river'; state.community.push(state.deck.pop()!); }
   else { showdown(state); return; }
   state.pending = state.players.filter((player) => !player.folded && !player.allIn).map((player) => player.id);
+  state.raiseRights = [...state.pending];
   if (state.pending.length <= 1) { runOut(state); return; }
   state.actorIndex = nextIndex(state, state.dealerIndex, (player) => state.pending.includes(player.id));
   const labels = { flop: '翻牌圈', turn: '转牌圈', river: '河牌圈' };
@@ -287,6 +354,8 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
   if (state.players[state.actorIndex]?.id !== player.id) throw new Error('还没轮到你');
   const index = state.actorIndex;
   const toCall = Math.max(0, state.currentBet - player.bet);
+  const raiseRights = ensureRaiseRights(state);
+  const canRaise = raiseRights.includes(player.id);
   if (kind === 'fold') player.folded = true;
   else if (kind === 'check') {
     if (toCall !== 0) throw new Error('需要跟注或弃牌');
@@ -295,27 +364,37 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
   } else if (kind === 'raise') {
     const target = Math.floor(Number(amount));
     const maxTarget = player.bet + player.stack;
-    if (!Number.isFinite(target) || target <= state.currentBet) throw new Error('加注额无效');
+    if (!canRaise) throw new Error('本轮下注未重新开放，只能跟注或弃牌');
+    if (!Number.isFinite(target) || target <= state.currentBet || target > maxTarget) throw new Error('加注额无效');
     if (target < state.currentBet + state.minRaise && target < maxTarget) throw new Error(`最少加注到 ${state.currentBet + state.minRaise}`);
     const previousBet = state.currentBet;
     commitChips(state, index, target - player.bet);
     state.currentBet = player.bet;
-    state.minRaise = Math.max(state.bigBlind, state.currentBet - previousBet);
-    state.pending = state.players.filter((candidate) => candidate.id !== player.id && !candidate.folded && !candidate.allIn).map((candidate) => candidate.id);
+    const raiseSize = state.currentBet - previousBet;
+    if (raiseSize >= state.minRaise) {
+      state.minRaise = raiseSize;
+      reopenAfterRaise(state, player.id);
+    } else {
+      requireResponsesToShortRaise(state, player.id);
+    }
   } else if (kind === 'allin') {
     const target = player.bet + player.stack;
     const previousBet = state.currentBet;
+    if (target > previousBet && !canRaise) throw new Error('本轮下注未重新开放，只能跟注或弃牌');
     commitChips(state, index, player.stack);
     if (target > previousBet) {
       const raiseSize = target - previousBet;
       state.currentBet = target;
       if (raiseSize >= state.minRaise) {
         state.minRaise = raiseSize;
-        state.pending = state.players.filter((candidate) => candidate.id !== player.id && !candidate.folded && !candidate.allIn).map((candidate) => candidate.id);
+        reopenAfterRaise(state, player.id);
+      } else {
+        requireResponsesToShortRaise(state, player.id);
       }
     }
   }
   state.pending = state.pending.filter((id) => id !== player.id);
+  state.raiseRights = ensureRaiseRights(state).filter((id) => id !== player.id);
   const remaining = state.players.filter((candidate) => !candidate.folded);
   if (remaining.length === 1) { uncontested(state, remaining[0]); return; }
   if (state.pending.length === 0) { advanceStreet(state); return; }

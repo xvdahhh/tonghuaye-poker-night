@@ -116,6 +116,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
   const isTurn = room.players[room.actorIndex]?.id === room.meId;
   const fundedPlayers = room.players.filter((player) => player.stack > 0).length;
   const toCall = Math.max(0, room.currentBet - me.bet);
+  const canRaise = room.raiseRights?.includes(me.id) ?? room.pending.includes(me.id);
   const minTarget = Math.min(me.bet + me.stack, room.currentBet + room.minRaise);
   const [raiseTarget, setRaiseTarget] = useState(minTarget);
 
@@ -198,11 +199,11 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
           <div className="action-buttons">
             <button disabled={busy} className="fold-button" onClick={() => onAction('fold')}>弃牌 <kbd>F</kbd></button>
             <button disabled={busy} onClick={() => onAction(toCall ? 'call' : 'check')}>{toCall ? `跟注 ${Math.min(toCall, me.stack)}` : '过牌'} <kbd>C</kbd></button>
-            {me.stack > toCall && <div className="raise-control">
+            {me.stack > toCall && canRaise && <div className="raise-control">
               <input aria-label="加注到" type="number" min={minTarget} max={me.bet + me.stack} step={room.bigBlind} value={raiseTarget} onChange={(event) => setRaiseTarget(Number(event.target.value))} />
               <button disabled={busy || raiseTarget <= room.currentBet} className="raise-button" onClick={() => onAction('raise', raiseTarget)}>加注到 {raiseTarget}</button>
             </div>}
-            <button disabled={busy} className="allin-button" onClick={() => onAction('allin')}>全下 {me.stack}</button>
+            <button disabled={busy || (me.stack > toCall && !canRaise)} className="allin-button" onClick={() => onAction('allin')}>全下 {me.stack}</button>
           </div>
         </section>
       )}

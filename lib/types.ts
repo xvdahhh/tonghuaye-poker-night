@@ -37,6 +37,7 @@ export type RoomState = {
   smallBlind: number;
   bigBlind: number;
   pending: string[];
+  raiseRights?: string[];
   winners: Winner[];
   message: string;
 };
