@@ -83,8 +83,8 @@ function PlayerSeat({ player, position, room }: { player: ClientPlayer; position
       <div className="player-avatar">{player.name.slice(0, 1)}</div>
       <div className="player-meta"><b>{isMe ? `${player.name}（你）` : player.name}</b><span>{player.stack.toLocaleString()} 筹码</span></div>
       {isDealer && <span className="dealer-badge">D</span>}
-      {player.allIn && <span className="state-badge">ALL IN</span>}
-      {player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
+      {player.allIn && !player.leaving && <span className="state-badge">ALL IN</span>}
+      {player.leaving ? <span className="state-badge">已退出</span> : player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
       {player.bet > 0 && <span className="seat-bet">{player.bet}</span>}
       {!!player.hole.length && <div className="seat-cards">{player.hole.map((card, index) => <Card key={`${card}-${index}`} value={card} small={!isMe} />)}</div>}
       {winner && <div className="winner-pop">+{winner.amount} · {winner.hand}</div>}
@@ -156,6 +156,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
         <div className="room-tools">
           <button className="room-code" onClick={() => { navigator.clipboard.writeText(room.code); toast('房间码已复制'); }} aria-label="复制房间码">房间 <b>{room.code}</b> <span>复制</span></button>
           <button className="invite-button" onClick={invite}>邀请好友</button>
+          <button className="exit-button" disabled={busy} onClick={onLeave} aria-label="退出房间">退出</button>
         </div>
       </nav>
 
@@ -190,8 +191,6 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
           {Array.from({ length: Math.max(0, 2 - room.players.length) }, (_, index) => <div className={`empty-seat seat-pos-${room.players.length + index}`} key={index}>等待入座</div>)}
         </div>
       </section>
-
-      {room.phase === 'lobby' && <button className="leave-link" onClick={onLeave}>离开牌桌</button>}
 
       {isTurn && room.phase !== 'showdown' && (
         <section className="action-dock" aria-label="牌局操作">
@@ -278,10 +277,18 @@ export default function Home() {
 
   async function leave() {
     if (!room) return;
-    await fetch(`/api/rooms/${room.code}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-player-token': token }, body: JSON.stringify({ action: 'leave' }) });
-    localStorage.removeItem(`poker-token-${room.code}`);
-    history.replaceState(null, '', location.pathname);
-    setRoom(null); setToken('');
+    const activeHand = ['preflop', 'flop', 'turn', 'river'].includes(room.phase);
+    if (activeHand && !window.confirm('现在退出会将本手牌视为弃牌，确定退出房间吗？')) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/rooms/${room.code}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-player-token': token }, body: JSON.stringify({ action: 'leave' }) });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? '退出失败');
+      localStorage.removeItem(`poker-token-${room.code}`);
+      history.replaceState(null, '', location.pathname);
+      setRoom(null); setToken('');
+    } catch (error) { toast(error instanceof Error ? error.message : '退出失败'); }
+    finally { setBusy(false); }
   }
 
   return <>{room ? <GameTable room={room} onAction={action} onLeave={leave} busy={busy} toast={toast} /> : <Landing onEnter={enter} />}{notice && <div className="toast" role="status">{notice}</div>}</>;
