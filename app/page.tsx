@@ -117,8 +117,16 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
   const fundedPlayers = room.players.filter((player) => player.stack > 0).length;
   const toCall = Math.max(0, room.currentBet - me.bet);
   const canRaise = room.raiseRights?.includes(me.id) ?? room.pending.includes(me.id);
-  const minTarget = Math.min(me.bet + me.stack, room.currentBet + room.minRaise);
+  const maximumTarget = me.bet + me.stack;
+  const rawMinimumTarget = room.currentBet > 0 ? room.currentBet * 2 : room.bigBlind;
+  const legalMinimumTarget = Math.ceil(rawMinimumTarget / room.bigBlind) * room.bigBlind;
+  const minTarget = Math.min(maximumTarget, legalMinimumTarget);
   const [raiseTarget, setRaiseTarget] = useState(minTarget);
+  const raiseIsAllIn = raiseTarget === maximumTarget;
+  const validRaiseTarget = Number.isInteger(raiseTarget)
+    && raiseTarget > room.currentBet
+    && raiseTarget <= maximumTarget
+    && (raiseIsAllIn || (raiseTarget >= legalMinimumTarget && raiseTarget % room.bigBlind === 0));
 
   useEffect(() => {
     const lastHandNo = previousHandNo.current;
@@ -200,8 +208,8 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
             <button disabled={busy} className="fold-button" onClick={() => onAction('fold')}>弃牌 <kbd>F</kbd></button>
             <button disabled={busy} onClick={() => onAction(toCall ? 'call' : 'check')}>{toCall ? `跟注 ${Math.min(toCall, me.stack)}` : '过牌'} <kbd>C</kbd></button>
             {me.stack > toCall && canRaise && <div className="raise-control">
-              <input aria-label="加注到" type="number" min={minTarget} max={me.bet + me.stack} step={room.bigBlind} value={raiseTarget} onChange={(event) => setRaiseTarget(Number(event.target.value))} />
-              <button disabled={busy || raiseTarget <= room.currentBet} className="raise-button" onClick={() => onAction('raise', raiseTarget)}>加注到 {raiseTarget}</button>
+              <input aria-label="加注到" type="number" min={minTarget} max={maximumTarget} step={room.bigBlind} value={raiseTarget} onChange={(event) => setRaiseTarget(Number(event.target.value))} />
+              <button disabled={busy || !validRaiseTarget} className="raise-button" onClick={() => onAction('raise', raiseTarget)}>加注到 {raiseTarget}</button>
             </div>}
             <button disabled={busy || (me.stack > toCall && !canRaise)} className="allin-button" onClick={() => onAction('allin')}>全下 {me.stack}</button>
           </div>

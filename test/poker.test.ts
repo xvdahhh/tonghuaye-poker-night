@@ -163,12 +163,70 @@ test('短码全下后，尚未行动的玩家仍然可以完成一次合法加�
   act(state, players[2], 'allin');
   assert.equal(state.players[state.actorIndex].id, 'D');
 
-  act(state, players[3], 'raise', 210);
+  act(state, players[3], 'raise', 260);
 
-  assert.equal(state.currentBet, 210);
-  assert.equal(state.minRaise, 80);
+  assert.equal(state.currentBet, 260);
+  assert.equal(state.minRaise, 260);
   assert.deepEqual(state.pending, ['A', 'B']);
   assert.deepEqual(state.raiseRights, ['A', 'B']);
+});
+
+test('普通加注至少为当前最高下注两倍，且必须是大盲整数倍', () => {
+  const makeState = () => {
+    const players = [
+      player('A', ['As', 'Ad'], 100, { stack: 900 }),
+      player('B', ['Kh', 'Kd'], 100, { stack: 900 }),
+      player('C', ['Qh', 'Qd'], 100, { stack: 900 }),
+    ];
+    return { players, state: room(players, {
+      phase: 'preflop',
+      actorIndex: 2,
+      deck: ['2s', '3h', '7d'],
+      community: [],
+      pot: 300,
+      currentBet: 100,
+      minRaise: 100,
+      pending: ['C'],
+      raiseRights: ['C'],
+    }) };
+  };
+
+  const belowDouble = makeState();
+  assert.throws(() => act(belowDouble.state, belowDouble.players[2], 'raise', 180), /至少到 200/);
+
+  const notBlindMultiple = makeState();
+  assert.throws(() => act(notBlindMultiple.state, notBlindMultiple.players[2], 'raise', 210), /大盲 20 的整数倍/);
+
+  const legal = makeState();
+  act(legal.state, legal.players[2], 'raise', 200);
+  assert.equal(legal.state.currentBet, 200);
+  assert.equal(legal.state.minRaise, 200);
+  assert.deepEqual(legal.state.pending, ['A', 'B']);
+});
+
+test('不足两倍且不是大盲整数倍时，真实全下仍然允许', () => {
+  const players = [
+    player('A', ['As', 'Ad'], 100, { stack: 900 }),
+    player('B', ['Kh', 'Kd'], 100, { stack: 900 }),
+    player('C', ['Qh', 'Qd'], 100, { stack: 50 }),
+  ];
+  const state = room(players, {
+    phase: 'preflop',
+    actorIndex: 2,
+    deck: ['2s', '3h', '7d'],
+    community: [],
+    pot: 300,
+    currentBet: 100,
+    minRaise: 100,
+    pending: ['C'],
+    raiseRights: ['C'],
+  });
+
+  act(state, players[2], 'allin');
+
+  assert.equal(state.currentBet, 150);
+  assert.deepEqual(state.pending, ['A', 'B']);
+  assert.deepEqual(state.raiseRights, []);
 });
 
 test('退出玩家已经投入的筹码保留在底池且全部派发', () => {
