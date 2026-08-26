@@ -3,6 +3,7 @@ import type { ActionKind, Player, RoomState, Winner } from './types';
 const RANKS = '23456789TJQKA';
 const SUITS = 'shdc';
 const HAND_NAMES = ['高牌', '一对', '两对', '三条', '顺子', '同花', '葫芦', '四条', '同花顺'];
+const RAISE_UNIT = 10;
 
 export function randomId(length = 20) {
   const bytes = new Uint8Array(length);
@@ -128,7 +129,7 @@ function requireResponsesToShortRaise(state: RoomState, playerId: string) {
 
 function minimumRaiseTarget(state: RoomState) {
   const minimum = state.currentBet > 0 ? state.currentBet * 2 : state.bigBlind;
-  return Math.ceil(minimum / state.bigBlind) * state.bigBlind;
+  return Math.ceil(minimum / RAISE_UNIT) * RAISE_UNIT;
 }
 
 function cleanupLeavingPlayers(state: RoomState) {
@@ -373,8 +374,8 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
     if (!canRaise) throw new Error('本轮下注未重新开放，只能跟注或弃牌');
     if (!Number.isInteger(target) || target <= state.currentBet || target > maxTarget) throw new Error('加注额无效');
     const isAllIn = target === maxTarget;
-    if (!isAllIn && (target < minimumTarget || target % state.bigBlind !== 0)) {
-      throw new Error(`加注需至少到 ${minimumTarget}，且为大盲 ${state.bigBlind} 的整数倍`);
+    if (!isAllIn && (target < minimumTarget || target % RAISE_UNIT !== 0)) {
+      throw new Error(`加注需至少到 ${minimumTarget}，且为 ${RAISE_UNIT} 的整数倍`);
     }
     commitChips(state, index, target - player.bet);
     state.currentBet = player.bet;
