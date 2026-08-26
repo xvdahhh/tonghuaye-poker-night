@@ -31,7 +31,7 @@ function freshDeck() {
 export function newRoom(code: string, name: string) {
   const player: Player = {
     id: randomId(10), token: randomId(28), name, stack: 1000, hole: [],
-    folded: false, allIn: false, bet: 0, totalBet: 0,
+    folded: false, allIn: false, leaving: false, bet: 0, totalBet: 0,
   };
   const state: RoomState = {
     code, phase: 'lobby', handNo: 0, hostId: player.id, players: [player], dealerIndex: -1,
@@ -46,7 +46,7 @@ export function joinRoom(state: RoomState, name: string) {
   if (state.players.length >= 6) throw new Error('这张牌桌已经坐满');
   const player: Player = {
     id: randomId(10), token: randomId(28), name, stack: 1000, hole: [],
-    folded: false, allIn: false, bet: 0, totalBet: 0,
+    folded: false, allIn: false, leaving: false, bet: 0, totalBet: 0,
   };
   state.players.push(player);
   state.message = `${player.name} 已入座`;
@@ -72,7 +72,17 @@ function commitChips(state: RoomState, index: number, amount: number) {
   return paid;
 }
 
+function cleanupLeavingPlayers(state: RoomState) {
+  const previousDealerId = state.players[state.dealerIndex]?.id;
+  state.players = state.players.filter((player) => !player.leaving);
+  state.dealerIndex = previousDealerId
+    ? state.players.findIndex((player) => player.id === previousDealerId)
+    : -1;
+  if (!state.players.some((player) => player.id === state.hostId)) state.hostId = state.players[0]?.id ?? '';
+}
+
 export function startHand(state: RoomState) {
+  cleanupLeavingPlayers(state);
   const funded = state.players.filter((player) => player.stack > 0);
   if (funded.length < 2) throw new Error('至少需要两位有筹码的玩家');
   if (state.phase !== 'lobby' && state.phase !== 'showdown') throw new Error('本手牌还没有结束');
@@ -199,6 +209,7 @@ function showdown(state: RoomState) {
   state.winners = winners;
   const names = winners.map((winner) => state.players.find((player) => player.id === winner.playerId)?.name).join('、');
   state.message = `${names} 赢得底池`;
+  cleanupLeavingPlayers(state);
 }
 
 function uncontested(state: RoomState, winner: Player) {
@@ -208,6 +219,44 @@ function uncontested(state: RoomState, winner: Player) {
   state.actorIndex = -1;
   state.pending = [];
   state.message = `${winner.name} 赢得 ${state.pot} 筹码`;
+  cleanupLeavingPlayers(state);
+}
+
+function removePlayer(state: RoomState, player: Player) {
+  const dealerId = state.players[state.dealerIndex]?.id;
+  state.players = state.players.filter((candidate) => candidate.id !== player.id);
+  state.dealerIndex = dealerId
+    ? state.players.findIndex((candidate) => candidate.id === dealerId)
+    : -1;
+  if (state.hostId === player.id) state.hostId = state.players[0]?.id ?? '';
+  state.message = `${player.name} 离开了牌桌`;
+}
+
+export function leaveRoom(state: RoomState, player: Player) {
+  if (state.phase === 'lobby' || state.phase === 'showdown') {
+    removePlayer(state, player);
+    return;
+  }
+
+  player.leaving = true;
+  if (state.hostId === player.id) {
+    state.hostId = state.players.find((candidate) => candidate.id !== player.id && !candidate.leaving)?.id ?? '';
+  }
+  if (player.folded) {
+    state.message = `${player.name} 已退出牌桌`;
+    return;
+  }
+
+  if (state.players[state.actorIndex]?.id === player.id) {
+    act(state, player, 'fold');
+  } else {
+    player.folded = true;
+    state.pending = state.pending.filter((id) => id !== player.id);
+    const remaining = state.players.filter((candidate) => !candidate.folded);
+    if (remaining.length === 1) uncontested(state, remaining[0]);
+    else if (state.pending.length === 0) advanceStreet(state);
+  }
+  if (state.phase !== 'showdown') state.message = `${player.name} 已退出，本手按弃牌处理`;
 }
 
 function runOut(state: RoomState) {
@@ -289,5 +338,4 @@ export function publicState(state: RoomState, version: number, token: string) {
     })),
   };
 }
-
 

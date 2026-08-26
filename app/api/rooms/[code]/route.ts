@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { mutateRoom, readRoom } from '@/lib/db';
-import { act, publicState, startHand } from '@/lib/poker';
+import { act, leaveRoom, publicState, startHand } from '@/lib/poker';
 import type { ActionKind } from '@/lib/types';
 
 type Context = { params: Promise<{ code: string }> };
@@ -34,10 +34,7 @@ export async function POST(request: Request, context: Context) {
         if (player.id !== state.hostId) throw new Error('只有房主可以开局');
         startHand(state);
       } else if (body.action === 'leave') {
-        if (state.phase !== 'lobby') throw new Error('牌局中不能离开座位');
-        state.players = state.players.filter((candidate) => candidate.id !== player.id);
-        if (state.hostId === player.id) state.hostId = state.players[0]?.id ?? '';
-        state.message = `${player.name} 离开了牌桌`;
+        leaveRoom(state, player);
       } else if (body.action === 'rebuy') {
         if (state.phase !== 'lobby' && state.phase !== 'showdown') throw new Error('请在本手结束后补充筹码');
         if (player.stack > 0) throw new Error('筹码归零后才能重新买入');

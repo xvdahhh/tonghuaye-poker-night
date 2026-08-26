@@ -10,6 +10,7 @@ export type Player = {
   hole: string[];
   folded: boolean;
   allIn: boolean;
+  leaving?: boolean;
   bet: number;
   totalBet: number;
 };
@@ -47,5 +48,4 @@ export type ClientRoom = Omit<RoomState, 'deck' | 'players'> & {
   version: number;
   meId: string;
 };
-
 
