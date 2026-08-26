@@ -1,8 +1,8 @@
 'use client';
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ActionKind, ClientPlayer, ClientRoom } from '@/lib/types';
-import { reconcileSeatOrder, seatOrderForPlayers } from '@/lib/seats';
+import { reconcileSeatOrder, rotateSeatOrderForHand, seatOrderForPlayers } from '@/lib/seats';
 
 const SUITS: Record<string, string> = { s: '♠', h: '♥', d: '♦', c: '♣' };
 
@@ -102,6 +102,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
   const me = room.players.find((player) => player.id === room.meId)!;
   const playerIdSignature = room.players.map((player) => player.id).sort().join('|');
   const [seatOrder, setSeatOrder] = useState(() => seatOrderForPlayers(room.players, room.meId));
+  const previousHandNo = useRef(room.handNo);
   const orderedPlayers = useMemo(() => {
     const playersById = new Map(room.players.map((player) => [player.id, player]));
     const seated = seatOrder.flatMap((id) => {
@@ -119,12 +120,15 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
   const [raiseTarget, setRaiseTarget] = useState(minTarget);
 
   useEffect(() => {
+    const lastHandNo = previousHandNo.current;
+    previousHandNo.current = room.handNo;
     setSeatOrder((current) => {
-      const next = reconcileSeatOrder(current, room.players, room.meId);
+      const reconciled = reconcileSeatOrder(current, room.players, room.meId);
+      const next = rotateSeatOrderForHand(reconciled, lastHandNo, room.handNo);
       const unchanged = next.length === current.length && next.every((id, index) => id === current[index]);
       return unchanged ? current : next;
     });
-  }, [room.code, room.meId, playerIdSignature]);
+  }, [room.code, room.handNo, room.meId, playerIdSignature]);
 
   useEffect(() => setRaiseTarget(minTarget), [minTarget, room.version]);
   useEffect(() => {

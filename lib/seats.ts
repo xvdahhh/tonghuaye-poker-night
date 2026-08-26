@@ -15,6 +15,14 @@ export function reconcileSeatOrder(current: string[], players: SeatPlayer[], pla
   const retained = current.filter((id) => activeIds.has(id));
   const retainedIds = new Set(retained);
   const arrivals = players.map((player) => player.id).filter((id) => !retainedIds.has(id));
-  return anchorToPlayer([...retained, ...arrivals], playerId);
+  const next = [...retained, ...arrivals];
+  return retained.includes(playerId) ? next : anchorToPlayer(next, playerId);
+}
+
+export function rotateSeatOrderForHand(current: string[], previousHandNo: number, handNo: number) {
+  if (previousHandNo <= 0 || handNo <= previousHandNo || current.length <= 1) return current;
+  const steps = (handNo - previousHandNo) % current.length;
+  if (steps === 0) return current;
+  return [...current.slice(steps), ...current.slice(0, steps)];
 }
 
