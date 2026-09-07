@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { act } from '../lib/poker.ts';
+import { act, joinRoom, leaveRoom, startHand } from '../lib/poker.ts';
 import type { Player, RoomState } from '../lib/types.ts';
 
 const BOARD = ['2s', '3h', '7d', '9c', 'Jc'];
@@ -256,6 +256,53 @@ test('退出玩家已经投入的筹码保留在底池且全部派发', () => {
   assert.deepEqual(state.winners, [{ playerId: 'A', amount: 350, hand: '一对' }]);
 });
 
+test('牌局中新玩家可入座旁观，并在下一手自动参战', () => {
+  const players = [
+    player('A', ['As', 'Ad'], 20, { stack: 980 }),
+    player('B', ['Kh', 'Kd'], 20, { stack: 980 }),
+  ];
+  const state = room(players, {
+    phase: 'flop',
+    actorIndex: 0,
+    pending: ['A', 'B'],
+    raiseRights: ['A', 'B'],
+    message: '第 1 手 · 翻牌圈',
+  });
+  const pendingBeforeJoin = [...state.pending];
+
+  const newcomer = joinRoom(state, 'C');
+
+  assert.equal(newcomer.waitingForNextHand, true);
+  assert.equal(newcomer.folded, true);
+  assert.deepEqual(newcomer.hole, []);
+  assert.deepEqual(state.pending, pendingBeforeJoin);
+  assert.equal(state.message, '第 1 手 · 翻牌圈');
+
+  state.phase = 'showdown';
+  state.actorIndex = -1;
+  state.pending = [];
+  state.raiseRights = [];
+  startHand(state);
+
+  assert.equal(newcomer.waitingForNextHand, false);
+  assert.equal(newcomer.folded, false);
+  assert.equal(newcomer.hole.length, 2);
+  assert.equal(state.pending.includes(newcomer.id), true);
+});
+
+test('等待下手的新玩家退出时立即释放座位', () => {
+  const players = [
+    player('A', ['As', 'Ad'], 20, { stack: 980 }),
+    player('B', ['Kh', 'Kd'], 20, { stack: 980 }),
+  ];
+  const state = room(players, { phase: 'turn', actorIndex: 0, pending: ['A', 'B'] });
+  const newcomer = joinRoom(state, 'C');
+
+  leaveRoom(state, newcomer);
+
+  assert.equal(state.players.some((candidate) => candidate.id === newcomer.id), false);
+});
+
 test('多种投入与弃牌组合始终保持筹码守恒', () => {
   const values = [0, 1, 2, 5];
   const holes = [['As', 'Ad'], ['Kh', 'Kd'], ['Qh', 'Qd']];
@@ -295,4 +342,3 @@ test('多种投入与弃牌组合始终保持筹码守恒', () => {
 
   assert.equal(checked, 441);
 });
-

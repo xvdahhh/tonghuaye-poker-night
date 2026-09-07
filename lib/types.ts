@@ -11,6 +11,7 @@ export type Player = {
   folded: boolean;
   allIn: boolean;
   leaving?: boolean;
+  waitingForNextHand?: boolean;
   bet: number;
   totalBet: number;
 };
@@ -49,4 +50,3 @@ export type ClientRoom = Omit<RoomState, 'deck' | 'players'> & {
   version: number;
   meId: string;
 };
-

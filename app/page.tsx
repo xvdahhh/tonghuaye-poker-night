@@ -80,12 +80,12 @@ function PlayerSeat({ player, position, room }: { player: ClientPlayer; position
   const isDealer = room.players[room.dealerIndex]?.id === player.id;
   const winner = room.winners.find((item) => item.playerId === player.id);
   return (
-    <div className={`player-seat seat-pos-${position} ${isMe ? 'is-me' : ''} ${isActor ? 'is-actor' : ''} ${player.folded ? 'is-folded' : ''}`}>
+    <div className={`player-seat seat-pos-${position} ${isMe ? 'is-me' : ''} ${isActor ? 'is-actor' : ''} ${player.folded && !player.waitingForNextHand ? 'is-folded' : ''} ${player.waitingForNextHand ? 'is-waiting' : ''}`}>
       <div className="player-avatar">{player.name.slice(0, 1)}</div>
       <div className="player-meta"><b>{isMe ? `${player.name}（你）` : player.name}</b><span>{player.stack.toLocaleString()} 筹码</span></div>
       {isDealer && <span className="dealer-badge">D</span>}
       {player.allIn && !player.leaving && <span className="state-badge">ALL IN</span>}
-      {player.leaving ? <span className="state-badge">已退出</span> : player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
+      {player.leaving ? <span className="state-badge">已退出</span> : player.waitingForNextHand ? <span className="state-badge waiting-badge">下手参战</span> : player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
       {player.bet > 0 && <span className="seat-bet">{player.bet}</span>}
       {!!player.hole.length && <div className="seat-cards">{player.hole.map((card, index) => <Card key={`${card}-${index}`} value={card} small={!isMe} />)}</div>}
       {winner && <div className="winner-pop">+{winner.amount} · {winner.hand}</div>}
@@ -171,7 +171,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
       </nav>
 
       <section className="game-area">
-        <div className="game-status"><span className="sync-dot" /> {room.phase === 'lobby' ? '等待开局' : room.message}</div>
+        <div className="game-status"><span className="sync-dot" /> {me.waitingForNextHand ? '已入座，下一手开始参战' : room.phase === 'lobby' ? '等待开局' : room.message}</div>
         <div className="felt game-felt">
           <div className="felt-ring" />
           {room.phase === 'lobby' ? (
@@ -188,7 +188,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
                 {room.community.map((card) => <Card key={card} value={card} />)}
                 {Array.from({ length: 5 - room.community.length }, (_, index) => <span className="card-slot" key={index} />)}
               </div>
-              <p>{room.phase === 'showdown' ? room.message : isTurn ? '轮到你行动' : `等待 ${room.players[room.actorIndex]?.name ?? '玩家'}…`}</p>
+              <p>{me.waitingForNextHand ? '你可以观看当前牌局，下一手会自动发牌' : room.phase === 'showdown' ? room.message : isTurn ? '轮到你行动' : `等待 ${room.players[room.actorIndex]?.name ?? '玩家'}…`}</p>
               {room.phase === 'showdown' && <div className="showdown-actions">
                 {me.stack === 0 && <button className="rebuy-button" disabled={busy} onClick={() => onAction('rebuy')}>补充 1,000 筹码</button>}
                 {isHost && <button className="next-hand" disabled={busy || fundedPlayers < 2} onClick={() => onAction('start')}>{fundedPlayers < 2 ? '等待玩家补充筹码' : '开始下一手'}</button>}
@@ -303,4 +303,3 @@ export default function Home() {
 
   return <>{room ? <GameTable room={room} onAction={action} onLeave={leave} busy={busy} toast={toast} /> : <Landing onEnter={enter} />}{notice && <div className="toast" role="status">{notice}</div>}</>;
 }
-
