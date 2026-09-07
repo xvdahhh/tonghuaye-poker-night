@@ -15,16 +15,25 @@ function Card({ value, small = false }: { value: string; small?: boolean }) {
   return <span className={`playing-card ${red ? 'red' : ''} ${small ? 'small' : ''}`} aria-label={`${rank}${suit}`}><b>{rank}</b><i>{suit}</i></span>;
 }
 
-function Landing({ onEnter }: { onEnter: (mode: 'create' | 'join', name: string, code?: string) => Promise<void> }) {
+function Landing({ onEnter, onReconnect }: {
+  onEnter: (mode: 'create' | 'join', name: string, code?: string) => Promise<void>;
+  onReconnect: (code: string, reconnectCode: string) => Promise<void>;
+}) {
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [showReconnect, setShowReconnect] = useState(false);
+  const [reconnectRoom, setReconnectRoom] = useState('');
+  const [reconnectCode, setReconnectCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setName(localStorage.getItem('poker-name') ?? '');
-    const incoming = new URLSearchParams(location.search).get('room');
-    if (incoming) setCode(incoming.toUpperCase());
+    const timer = window.setTimeout(() => {
+      setName(localStorage.getItem('poker-name') ?? '');
+      const incoming = new URLSearchParams(location.search).get('room');
+      if (incoming) { setCode(incoming.toUpperCase()); setReconnectRoom(incoming.toUpperCase()); }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   async function submit(mode: 'create' | 'join', event: FormEvent) {
@@ -34,6 +43,17 @@ function Landing({ onEnter }: { onEnter: (mode: 'create' | 'join', name: string,
     setBusy(true); setError('');
     try { await onEnter(mode, name.trim(), code.trim().toUpperCase()); }
     catch (caught) { setError(caught instanceof Error ? caught.message : '没能进入牌桌'); setBusy(false); }
+  }
+
+  async function submitReconnect(event: FormEvent) {
+    event.preventDefault();
+    if (reconnectRoom.length !== 6 || reconnectCode.length !== 12) {
+      setError('请输入 6 位房间号和 12 位重连码');
+      return;
+    }
+    setBusy(true); setError('');
+    try { await onReconnect(reconnectRoom, reconnectCode); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : '没能恢复座位'); setBusy(false); }
   }
 
   return (
@@ -56,6 +76,18 @@ function Landing({ onEnter }: { onEnter: (mode: 'create' | 'join', name: string,
             <label>好友的房间码<input value={code} maxLength={6} onChange={(event) => setCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ''))} placeholder="例如：Q7K9XP" /></label>
             <button className="secondary-action" disabled={busy}>加入牌桌</button>
           </form>
+          <div className="reconnect-box">
+            {!showReconnect ? (
+              <button type="button" className="reconnect-toggle" onClick={() => setShowReconnect(true)}>换了设备？使用重连码恢复原座位</button>
+            ) : (
+              <form className="reconnect-form" onSubmit={submitReconnect}>
+                <label>房间号<input value={reconnectRoom} maxLength={6} onChange={(event) => setReconnectRoom(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ''))} placeholder="6 位房间号" /></label>
+                <label>重连码<input value={reconnectCode} maxLength={12} onChange={(event) => setReconnectCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ''))} placeholder="12 位重连码" /></label>
+                <button disabled={busy}>恢复座位</button>
+                <button type="button" className="reconnect-cancel" onClick={() => setShowReconnect(false)}>取消</button>
+              </form>
+            )}
+          </div>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
       </section>
@@ -82,7 +114,7 @@ function PlayerSeat({ player, position, room }: { player: ClientPlayer; position
   return (
     <div className={`player-seat seat-pos-${position} ${isMe ? 'is-me' : ''} ${isActor ? 'is-actor' : ''} ${player.folded && !player.waitingForNextHand ? 'is-folded' : ''} ${player.waitingForNextHand ? 'is-waiting' : ''}`}>
       <div className="player-avatar">{player.name.slice(0, 1)}</div>
-      <div className="player-meta"><b>{isMe ? `${player.name}（你）` : player.name}</b><span>{player.stack.toLocaleString()} 筹码</span></div>
+      <div className="player-meta"><b>{isMe ? `${player.name}（你）` : player.name}</b><span><i className={`presence-dot ${player.online ? 'online' : ''}`} aria-label={player.online ? '在线' : '离线'} />{player.stack.toLocaleString()} 筹码</span></div>
       {isDealer && <span className="dealer-badge">D</span>}
       {player.allIn && !player.leaving && <span className="state-badge">ALL IN</span>}
       {player.leaving ? <span className="state-badge">已退出</span> : player.waitingForNextHand ? <span className="state-badge waiting-badge">下手参战</span> : player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
@@ -93,16 +125,19 @@ function PlayerSeat({ player, position, room }: { player: ClientPlayer; position
   );
 }
 
-function GameTable({ room, onAction, onLeave, busy, toast }: {
+function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
   room: ClientRoom;
   onAction: (action: ActionKind | 'start' | 'rebuy', amount?: number) => Promise<void>;
   onLeave: () => Promise<void>;
   busy: boolean;
   toast: (message: string) => void;
+  connectionState: 'connected' | 'reconnecting';
 }) {
   const me = room.players.find((player) => player.id === room.meId)!;
   const playerIdSignature = room.players.map((player) => player.id).sort().join('|');
   const [seatOrder, setSeatOrder] = useState(() => seatOrderForPlayers(room.players, room.meId));
+  const [showInfo, setShowInfo] = useState(false);
+  const [clockNow, setClockNow] = useState(0);
   const previousHandNo = useRef(room.handNo);
   const orderedPlayers = useMemo(() => {
     const playersById = new Map(room.players.map((player) => [player.id, player]));
@@ -128,6 +163,9 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
     && raiseTarget > room.currentBet
     && raiseTarget <= maximumTarget
     && (raiseIsAllIn || (raiseTarget >= legalMinimumTarget && raiseTarget % RAISE_UNIT === 0));
+  const turnSeconds = room.turnDeadlineAt
+    ? clockNow ? Math.max(0, Math.ceil((room.turnDeadlineAt - clockNow) / 1000)) : Math.ceil(room.turnDurationMs / 1000)
+    : 0;
 
   useEffect(() => {
     const lastHandNo = previousHandNo.current;
@@ -138,9 +176,16 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
       const unchanged = next.length === current.length && next.every((id, index) => id === current[index]);
       return unchanged ? current : next;
     });
-  }, [room.code, room.handNo, room.meId, playerIdSignature]);
+  }, [room.code, room.handNo, room.meId, room.players, playerIdSignature]);
 
-  useEffect(() => setRaiseTarget(minTarget), [minTarget, room.version]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setRaiseTarget(minTarget), 0);
+    return () => window.clearTimeout(timer);
+  }, [minTarget, room.version]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, []);
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (!isTurn || busy || event.repeat || (event.target instanceof HTMLInputElement)) return;
@@ -166,12 +211,13 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
         <div className="room-tools">
           <button className="room-code" onClick={() => { navigator.clipboard.writeText(room.code); toast('房间码已复制'); }} aria-label="复制房间码">房间 <b>{room.code}</b> <span>复制</span></button>
           <button className="invite-button" onClick={invite}>邀请好友</button>
+          <button className="info-button" onClick={() => setShowInfo(true)}>牌局记录</button>
           <button className="exit-button" disabled={busy} onClick={onLeave} aria-label="退出房间">退出</button>
         </div>
       </nav>
 
       <section className="game-area">
-        <div className="game-status"><span className="sync-dot" /> {me.waitingForNextHand ? '已入座，下一手开始参战' : room.phase === 'lobby' ? '等待开局' : room.message}</div>
+        <div className="game-status"><span className={`sync-dot ${connectionState}`} /> {connectionState === 'reconnecting' ? '连接中断，正在重连…' : me.waitingForNextHand ? '已入座，下一手开始参战' : room.phase === 'lobby' ? '等待开局' : room.message}</div>
         <div className="felt game-felt">
           <div className="felt-ring" />
           {room.phase === 'lobby' ? (
@@ -188,7 +234,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
                 {room.community.map((card) => <Card key={card} value={card} />)}
                 {Array.from({ length: 5 - room.community.length }, (_, index) => <span className="card-slot" key={index} />)}
               </div>
-              <p>{me.waitingForNextHand ? '你可以观看当前牌局，下一手会自动发牌' : room.phase === 'showdown' ? room.message : isTurn ? '轮到你行动' : `等待 ${room.players[room.actorIndex]?.name ?? '玩家'}…`}</p>
+              <p>{me.waitingForNextHand ? '你可以观看当前牌局，下一手会自动发牌' : room.phase === 'showdown' ? room.message : isTurn ? `轮到你行动 · ${turnSeconds} 秒` : `等待 ${room.players[room.actorIndex]?.name ?? '玩家'} · ${turnSeconds} 秒`}</p>
               {room.phase === 'showdown' && <div className="showdown-actions">
                 {me.stack === 0 && <button className="rebuy-button" disabled={busy} onClick={() => onAction('rebuy')}>补充 1,000 筹码</button>}
                 {isHost && <button className="next-hand" disabled={busy || fundedPlayers < 2} onClick={() => onAction('start')}>{fundedPlayers < 2 ? '等待玩家补充筹码' : '开始下一手'}</button>}
@@ -204,7 +250,7 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
 
       {isTurn && room.phase !== 'showdown' && (
         <section className="action-dock" aria-label="牌局操作">
-          <div className="turn-copy"><span>轮到你</span><b>{toCall ? `需跟注 ${Math.min(toCall, me.stack)}` : '可以过牌'}</b></div>
+          <div className="turn-copy"><span>轮到你 · {turnSeconds} 秒</span><b>{toCall ? `需跟注 ${Math.min(toCall, me.stack)}` : '可以过牌'}</b></div>
           <div className="action-buttons">
             <button disabled={busy} className="fold-button" onClick={() => onAction('fold')}>弃牌 <kbd>F</kbd></button>
             <button disabled={busy} onClick={() => onAction(toCall ? 'call' : 'check')}>{toCall ? `跟注 ${Math.min(toCall, me.stack)}` : '过牌'} <kbd>C</kbd></button>
@@ -216,6 +262,20 @@ function GameTable({ room, onAction, onLeave, busy, toast }: {
           </div>
         </section>
       )}
+      {showInfo && (
+        <aside className="game-info-panel" aria-label="牌局记录">
+          <div className="info-panel-header"><div><span>HAND {room.handNo || '—'}</span><h2>本手记录</h2></div><button onClick={() => setShowInfo(false)} aria-label="关闭牌局记录">×</button></div>
+          <div className="reconnect-card">
+            <div><span>跨设备恢复座位</span><code>{room.myReconnectCode}</code></div>
+            <button onClick={() => { navigator.clipboard.writeText(room.myReconnectCode); toast('重连码已复制，请妥善保存'); }}>复制重连码</button>
+          </div>
+          <ol className="action-log">
+            {room.actionLog.length ? [...room.actionLog].reverse().map((entry) => (
+              <li key={entry.id}><time>{new Date(entry.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time><span>{entry.text}</span></li>
+            )) : <li className="empty-log">本手还没有操作记录</li>}
+          </ol>
+        </aside>
+      )}
       <p className="fair-note">仅供好友休闲娱乐 · 不涉及真钱交易</p>
     </main>
   );
@@ -226,6 +286,7 @@ export default function Home() {
   const [token, setToken] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [connectionState, setConnectionState] = useState<'connected' | 'reconnecting'>('connected');
 
   const toast = useCallback((message: string) => {
     setNotice(message);
@@ -233,13 +294,19 @@ export default function Home() {
   }, []);
 
   const fetchRoom = useCallback(async (code: string, playerToken: string) => {
-    const response = await fetch(`/api/rooms/${code}`, { headers: { 'x-player-token': playerToken }, cache: 'no-store' });
-    if (!response.ok) {
-      const failure = await response.json() as { error?: string };
-      throw new Error(failure.error ?? '同步失败');
+    try {
+      const response = await fetch(`/api/rooms/${code}`, { headers: { 'x-player-token': playerToken }, cache: 'no-store' });
+      if (!response.ok) {
+        const failure = await response.json() as { error?: string };
+        throw new Error(failure.error ?? '同步失败');
+      }
+      const data = await response.json() as { room: ClientRoom };
+      setRoom((current) => !current || data.room.version >= current.version ? data.room : current);
+      setConnectionState('connected');
+    } catch (error) {
+      setConnectionState('reconnecting');
+      throw error;
     }
-    const data = await response.json() as { room: ClientRoom };
-    setRoom((current) => !current || data.room.version >= current.version ? data.room : current);
   }, []);
 
   useEffect(() => {
@@ -247,15 +314,19 @@ export default function Home() {
     if (!code) return;
     const savedToken = localStorage.getItem(`poker-token-${code}`);
     if (!savedToken) return;
-    setToken(savedToken);
-    fetchRoom(code, savedToken).catch(() => localStorage.removeItem(`poker-token-${code}`));
+    const timer = window.setTimeout(() => {
+      setToken(savedToken);
+      fetchRoom(code, savedToken).catch(() => { localStorage.removeItem(`poker-token-${code}`); setToken(''); });
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [fetchRoom]);
 
+  const activeRoomCode = room?.code;
   useEffect(() => {
-    if (!room || !token) return;
-    const timer = window.setInterval(() => fetchRoom(room.code, token).catch(() => undefined), 1200);
+    if (!activeRoomCode || !token) return;
+    const timer = window.setInterval(() => fetchRoom(activeRoomCode, token).catch(() => undefined), 1200);
     return () => window.clearInterval(timer);
-  }, [room?.code, token, fetchRoom]);
+  }, [activeRoomCode, token, fetchRoom]);
 
   async function enter(mode: 'create' | 'join', name: string, code?: string) {
     const response = await fetch('/api/rooms', {
@@ -267,7 +338,21 @@ export default function Home() {
     localStorage.setItem('poker-name', name);
     localStorage.setItem(`poker-token-${data.room.code}`, data.token);
     history.replaceState(null, '', `?room=${data.room.code}`);
-    setToken(data.token); setRoom(data.room);
+    setToken(data.token); setRoom(data.room); setConnectionState('connected');
+  }
+
+  async function reconnect(code: string, reconnectCode: string) {
+    const response = await fetch('/api/rooms', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'reconnect', code, reconnectCode }),
+    });
+    const data = await response.json() as { error?: string; token?: string; room?: ClientRoom };
+    if (!response.ok || !data.room || !data.token) throw new Error(data.error ?? '没能恢复座位');
+    const me = data.room.players.find((player) => player.id === data.room?.meId);
+    if (me) localStorage.setItem('poker-name', me.name);
+    localStorage.setItem(`poker-token-${data.room.code}`, data.token);
+    history.replaceState(null, '', `?room=${data.room.code}`);
+    setToken(data.token); setRoom(data.room); setConnectionState('connected');
   }
 
   async function action(kind: ActionKind | 'start' | 'rebuy', amount?: number) {
@@ -301,5 +386,5 @@ export default function Home() {
     finally { setBusy(false); }
   }
 
-  return <>{room ? <GameTable room={room} onAction={action} onLeave={leave} busy={busy} toast={toast} /> : <Landing onEnter={enter} />}{notice && <div className="toast" role="status">{notice}</div>}</>;
+  return <>{room ? <GameTable room={room} onAction={action} onLeave={leave} busy={busy} toast={toast} connectionState={connectionState} /> : <Landing onEnter={enter} onReconnect={reconnect} />}{notice && <div className="toast" role="status">{notice}</div>}</>;
 }

@@ -6,24 +6,7 @@ type RoomRow = {
   version: number;
 };
 
-let schemaReady = false;
-
-export async function ensureSchema() {
-  if (schemaReady) return;
-  await env.DB.prepare(`
-    CREATE TABLE IF NOT EXISTS rooms (
-      code TEXT PRIMARY KEY NOT NULL,
-      state_json TEXT NOT NULL,
-      version INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )
-  `).run();
-  schemaReady = true;
-}
-
 export async function insertRoom(state: RoomState) {
-  await ensureSchema();
   const now = Date.now();
   return env.DB.prepare(
     'INSERT INTO rooms (code, state_json, version, created_at, updated_at) VALUES (?, ?, 1, ?, ?)',
@@ -31,7 +14,6 @@ export async function insertRoom(state: RoomState) {
 }
 
 export async function readRoom(code: string) {
-  await ensureSchema();
   const row = await env.DB.prepare(
     'SELECT state_json, version FROM rooms WHERE code = ?',
   ).bind(code).first<RoomRow>();
@@ -43,7 +25,6 @@ export async function mutateRoom<T>(
   code: string,
   transform: (state: RoomState) => { state: RoomState; result: T },
 ) {
-  await ensureSchema();
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const current = await readRoom(code);
     if (!current) return null;
@@ -58,4 +39,23 @@ export async function mutateRoom<T>(
   throw new Error('牌桌正忙，请重试');
 }
 
+export async function touchPresence(code: string, playerId: string, now = Date.now()) {
+  await env.DB.prepare(`
+    INSERT INTO room_presence (room_code, player_id, last_seen_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT (room_code, player_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+  `).bind(code, playerId, now).run();
+}
 
+export async function readPresence(code: string) {
+  const result = await env.DB.prepare(
+    'SELECT player_id, last_seen_at FROM room_presence WHERE room_code = ?',
+  ).bind(code).all<{ player_id: string; last_seen_at: number }>();
+  return Object.fromEntries((result.results ?? []).map((row) => [row.player_id, row.last_seen_at]));
+}
+
+export async function clearPresence(code: string, playerId: string) {
+  await env.DB.prepare(
+    'DELETE FROM room_presence WHERE room_code = ? AND player_id = ?',
+  ).bind(code, playerId).run();
+}

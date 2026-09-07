@@ -1,14 +1,70 @@
-import type { ActionKind, Player, RoomState, Winner } from './types';
+import type { ActionKind, ActionLogEntry, Player, RoomState, Winner } from './types';
 
 const RANKS = '23456789TJQKA';
 const SUITS = 'shdc';
 const HAND_NAMES = ['高牌', '一对', '两对', '三条', '顺子', '同花', '葫芦', '四条', '同花顺'];
 const RAISE_UNIT = 10;
+export const TURN_DURATION_MS = 30_000;
+const RECONNECT_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ACTIVE_PHASES = ['preflop', 'flop', 'turn', 'river'];
 
 export function randomId(length = 20) {
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (value) => (value % 36).toString(36)).join('');
+}
+
+function reconnectCode() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => RECONNECT_CHARS[value % RECONNECT_CHARS.length]).join('');
+}
+
+function uniqueReconnectCode(state: RoomState) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const code = reconnectCode();
+    if (!state.players.some((player) => player.reconnectCode === code)) return code;
+  }
+  throw new Error('重连码生成失败，请重试');
+}
+
+export function appendActionLog(state: RoomState, text: string, at = Date.now()) {
+  const entry: ActionLogEntry = { id: randomId(8), handNo: state.handNo, at, text };
+  state.actionLog = [...(state.actionLog ?? []), entry].slice(-80);
+  return entry;
+}
+
+function armTurnTimer(state: RoomState, now = Date.now()) {
+  state.turnDurationMs = state.turnDurationMs ?? TURN_DURATION_MS;
+  state.turnDeadlineAt = state.actorIndex >= 0 && ACTIVE_PHASES.includes(state.phase)
+    ? now + state.turnDurationMs
+    : undefined;
+}
+
+export function upgradeRoomState(state: RoomState, now = Date.now()) {
+  let changed = false;
+  if (!state.turnDurationMs) { state.turnDurationMs = TURN_DURATION_MS; changed = true; }
+  if (!state.actionLog) { state.actionLog = []; changed = true; }
+  state.players.forEach((player) => {
+    if (!player.reconnectCode) { player.reconnectCode = uniqueReconnectCode(state); changed = true; }
+  });
+  if (ACTIVE_PHASES.includes(state.phase) && state.actorIndex >= 0 && !state.turnDeadlineAt) {
+    state.turnDeadlineAt = now + state.turnDurationMs;
+    changed = true;
+  }
+  if (!ACTIVE_PHASES.includes(state.phase) && state.turnDeadlineAt) {
+    state.turnDeadlineAt = undefined;
+    changed = true;
+  }
+  return changed;
+}
+
+export function needsRoomMaintenance(state: RoomState, now = Date.now()) {
+  return !state.turnDurationMs
+    || !state.actionLog
+    || state.players.some((player) => !player.reconnectCode)
+    || (ACTIVE_PHASES.includes(state.phase) && state.actorIndex >= 0 && (!state.turnDeadlineAt || state.turnDeadlineAt <= now))
+    || (!ACTIVE_PHASES.includes(state.phase) && Boolean(state.turnDeadlineAt));
 }
 
 export function roomCode() {
@@ -31,26 +87,38 @@ function freshDeck() {
 
 export function newRoom(code: string, name: string) {
   const player: Player = {
-    id: randomId(10), token: randomId(28), name, stack: 1000, hole: [],
+    id: randomId(10), token: randomId(28), reconnectCode: reconnectCode(), name, stack: 1000, hole: [],
     folded: false, allIn: false, leaving: false, waitingForNextHand: false, bet: 0, totalBet: 0,
   };
   const state: RoomState = {
     code, phase: 'lobby', handNo: 0, hostId: player.id, players: [player], dealerIndex: -1,
     actorIndex: -1, deck: [], community: [], pot: 0, currentBet: 0, minRaise: 20,
     smallBlind: 10, bigBlind: 20, pending: [], raiseRights: [], winners: [], message: '等待好友加入牌桌',
+    turnDurationMs: TURN_DURATION_MS, actionLog: [],
   };
   return { state, player };
 }
 
 export function joinRoom(state: RoomState, name: string) {
+  upgradeRoomState(state);
   if (state.players.length >= 6) throw new Error('这张牌桌已经坐满');
   const waitingForNextHand = state.phase !== 'lobby';
   const player: Player = {
-    id: randomId(10), token: randomId(28), name, stack: 1000, hole: [],
+    id: randomId(10), token: randomId(28), reconnectCode: uniqueReconnectCode(state), name, stack: 1000, hole: [],
     folded: waitingForNextHand, allIn: false, leaving: false, waitingForNextHand, bet: 0, totalBet: 0,
   };
   state.players.push(player);
   if (state.phase === 'lobby') state.message = `${player.name} 已入座`;
+  else appendActionLog(state, `${player.name} 已入座，将从下一手参战`);
+  return player;
+}
+
+export function reconnectPlayer(state: RoomState, rawCode: string) {
+  upgradeRoomState(state);
+  const code = rawCode.trim().toUpperCase();
+  const player = state.players.find((candidate) => candidate.reconnectCode === code && !candidate.leaving);
+  if (!player) throw new Error('房间号或重连码不正确');
+  player.token = randomId(28);
   return player;
 }
 
@@ -141,7 +209,8 @@ function cleanupLeavingPlayers(state: RoomState) {
   if (!state.players.some((player) => player.id === state.hostId)) state.hostId = state.players[0]?.id ?? '';
 }
 
-export function startHand(state: RoomState) {
+export function startHand(state: RoomState, now = Date.now()) {
+  upgradeRoomState(state, now);
   cleanupLeavingPlayers(state);
   const funded = state.players.filter((player) => player.stack > 0);
   if (funded.length < 2) throw new Error('至少需要两位有筹码的玩家');
@@ -155,6 +224,7 @@ export function startHand(state: RoomState) {
   state.currentBet = 0;
   state.minRaise = state.bigBlind;
   state.winners = [];
+  state.actionLog = [];
   state.players.forEach((player) => {
     player.hole = [];
     player.folded = player.stack <= 0;
@@ -184,7 +254,11 @@ export function startHand(state: RoomState) {
   state.raiseRights = [...state.pending];
   state.actorIndex = nextIndex(state, bigIndex, (player) => state.pending.includes(player.id) && !player.allIn);
   state.message = `第 ${state.handNo} 手 · 翻牌前`;
-  if (state.actorIndex < 0) runOut(state);
+  appendActionLog(state, `第 ${state.handNo} 手开始`, now);
+  appendActionLog(state, `${state.players[smallIndex].name} 下小盲 ${state.players[smallIndex].bet}`, now);
+  appendActionLog(state, `${state.players[bigIndex].name} 下大盲 ${state.players[bigIndex].bet}`, now);
+  armTurnTimer(state, now);
+  if (state.actorIndex < 0) runOut(state, now);
 }
 
 type Rank = { score: number[]; name: string };
@@ -235,7 +309,7 @@ function bestHand(cards: string[]) {
   return best;
 }
 
-function showdown(state: RoomState) {
+function showdown(state: RoomState, now = Date.now()) {
   refundLegacyUncalledTotal(state);
   state.phase = 'showdown';
   state.actorIndex = -1;
@@ -278,10 +352,15 @@ function showdown(state: RoomState) {
   state.winners = winners;
   const names = winners.map((winner) => state.players.find((player) => player.id === winner.playerId)?.name).join('、');
   state.message = `${names} 赢得底池`;
+  appendActionLog(state, winners.map((winner) => {
+    const name = state.players.find((player) => player.id === winner.playerId)?.name ?? '玩家';
+    return `${name} 赢得 ${winner.amount}（${winner.hand}）`;
+  }).join('；'), now);
+  armTurnTimer(state, now);
   cleanupLeavingPlayers(state);
 }
 
-function uncontested(state: RoomState, winner: Player) {
+function uncontested(state: RoomState, winner: Player, now = Date.now()) {
   winner.stack += state.pot;
   state.winners = [{ playerId: winner.id, amount: state.pot, hand: '对手弃牌' }];
   state.phase = 'showdown';
@@ -289,6 +368,8 @@ function uncontested(state: RoomState, winner: Player) {
   state.pending = [];
   state.raiseRights = [];
   state.message = `${winner.name} 赢得 ${state.pot} 筹码`;
+  appendActionLog(state, `${winner.name} 赢得 ${state.pot}（对手弃牌）`, now);
+  armTurnTimer(state, now);
   cleanupLeavingPlayers(state);
 }
 
@@ -303,6 +384,7 @@ function removePlayer(state: RoomState, player: Player) {
 }
 
 export function leaveRoom(state: RoomState, player: Player) {
+  appendActionLog(state, `${player.name} 退出牌桌`);
   if (state.phase === 'lobby' || state.phase === 'showdown' || player.waitingForNextHand) {
     removePlayer(state, player);
     return;
@@ -330,16 +412,16 @@ export function leaveRoom(state: RoomState, player: Player) {
   if (state.phase !== 'showdown') state.message = `${player.name} 已退出，本手按弃牌处理`;
 }
 
-function runOut(state: RoomState) {
+function runOut(state: RoomState, now = Date.now()) {
   refundUncalledBet(state);
   while (state.community.length < 5) {
     if (state.community.length === 0) state.community.push(state.deck.pop()!, state.deck.pop()!, state.deck.pop()!);
     else state.community.push(state.deck.pop()!);
   }
-  showdown(state);
+  showdown(state, now);
 }
 
-function advanceStreet(state: RoomState) {
+function advanceStreet(state: RoomState, now = Date.now()) {
   refundUncalledBet(state);
   state.players.forEach((player) => { player.bet = 0; });
   state.currentBet = 0;
@@ -347,27 +429,42 @@ function advanceStreet(state: RoomState) {
   if (state.phase === 'preflop') { state.phase = 'flop'; state.community.push(state.deck.pop()!, state.deck.pop()!, state.deck.pop()!); }
   else if (state.phase === 'flop') { state.phase = 'turn'; state.community.push(state.deck.pop()!); }
   else if (state.phase === 'turn') { state.phase = 'river'; state.community.push(state.deck.pop()!); }
-  else { showdown(state); return; }
+  else { showdown(state, now); return; }
+  const streetLabels = { flop: '进入翻牌圈', turn: '进入转牌圈', river: '进入河牌圈' };
+  appendActionLog(state, streetLabels[state.phase as keyof typeof streetLabels], now);
   state.pending = state.players.filter((player) => !player.folded && !player.allIn).map((player) => player.id);
   state.raiseRights = [...state.pending];
-  if (state.pending.length <= 1) { runOut(state); return; }
+  if (state.pending.length <= 1) { runOut(state, now); return; }
   state.actorIndex = nextIndex(state, state.dealerIndex, (player) => state.pending.includes(player.id));
   const labels = { flop: '翻牌圈', turn: '转牌圈', river: '河牌圈' };
   state.message = `第 ${state.handNo} 手 · ${labels[state.phase as keyof typeof labels]}`;
+  armTurnTimer(state, now);
 }
 
-export function act(state: RoomState, player: Player, kind: ActionKind, amount?: number) {
-  if (!['preflop', 'flop', 'turn', 'river'].includes(state.phase)) throw new Error('现在不能操作');
+export function act(
+  state: RoomState,
+  player: Player,
+  kind: ActionKind,
+  amount?: number,
+  context: { timedOut?: boolean; now?: number } = {},
+) {
+  const now = context.now ?? Date.now();
+  if (!ACTIVE_PHASES.includes(state.phase)) throw new Error('现在不能操作');
   if (state.players[state.actorIndex]?.id !== player.id) throw new Error('还没轮到你');
   const index = state.actorIndex;
   const toCall = Math.max(0, state.currentBet - player.bet);
   const raiseRights = ensureRaiseRights(state);
   const canRaise = raiseRights.includes(player.id);
-  if (kind === 'fold') player.folded = true;
+  if (kind === 'fold') {
+    player.folded = true;
+    appendActionLog(state, context.timedOut ? `${player.name} 超时弃牌` : `${player.name} 弃牌`, now);
+  }
   else if (kind === 'check') {
     if (toCall !== 0) throw new Error('需要跟注或弃牌');
+    appendActionLog(state, context.timedOut ? `${player.name} 超时自动过牌` : `${player.name} 过牌`, now);
   } else if (kind === 'call') {
-    commitChips(state, index, toCall);
+    const paid = commitChips(state, index, toCall);
+    appendActionLog(state, `${player.name} 跟注 ${paid}`, now);
   } else if (kind === 'raise') {
     const target = Number(amount);
     const maxTarget = player.bet + player.stack;
@@ -379,6 +476,7 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
       throw new Error(`加注需至少到 ${minimumTarget}，且为 ${RAISE_UNIT} 的整数倍`);
     }
     commitChips(state, index, target - player.bet);
+    appendActionLog(state, `${player.name} 加注到 ${target}`, now);
     state.currentBet = player.bet;
     if (state.currentBet >= minimumTarget) {
       state.minRaise = state.currentBet;
@@ -392,6 +490,7 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
     const minimumTarget = minimumRaiseTarget(state);
     if (target > previousBet && !canRaise) throw new Error('本轮下注未重新开放，只能跟注或弃牌');
     commitChips(state, index, player.stack);
+    appendActionLog(state, `${player.name} 全下至 ${target}`, now);
     if (target > previousBet) {
       state.currentBet = target;
       if (state.currentBet >= minimumTarget) {
@@ -405,13 +504,31 @@ export function act(state: RoomState, player: Player, kind: ActionKind, amount?:
   state.pending = state.pending.filter((id) => id !== player.id);
   state.raiseRights = ensureRaiseRights(state).filter((id) => id !== player.id);
   const remaining = state.players.filter((candidate) => !candidate.folded);
-  if (remaining.length === 1) { uncontested(state, remaining[0]); return; }
-  if (state.pending.length === 0) { advanceStreet(state); return; }
+  if (remaining.length === 1) { uncontested(state, remaining[0], now); return; }
+  if (state.pending.length === 0) { advanceStreet(state, now); return; }
   state.actorIndex = nextIndex(state, index, (candidate) => state.pending.includes(candidate.id) && !candidate.folded && !candidate.allIn);
-  if (state.actorIndex < 0) advanceStreet(state);
+  if (state.actorIndex < 0) advanceStreet(state, now);
+  else armTurnTimer(state, now);
 }
 
-export function publicState(state: RoomState, version: number, token: string) {
+export function applyTurnTimeout(state: RoomState, now = Date.now()) {
+  upgradeRoomState(state, now);
+  if (!ACTIVE_PHASES.includes(state.phase) || !state.turnDeadlineAt || state.turnDeadlineAt > now) return false;
+  const player = state.players[state.actorIndex];
+  if (!player) { armTurnTimer(state, now); return false; }
+  const toCall = Math.max(0, state.currentBet - player.bet);
+  act(state, player, toCall > 0 ? 'fold' : 'check', undefined, { timedOut: true, now });
+  return true;
+}
+
+export function publicState(
+  state: RoomState,
+  version: number,
+  token: string,
+  presence: Record<string, number> = {},
+  now = Date.now(),
+) {
+  upgradeRoomState(state, now);
   const me = state.players.find((player) => player.token === token);
   if (!me) throw new Error('无效的玩家凭证');
   const reveal = state.phase === 'showdown';
@@ -419,10 +536,19 @@ export function publicState(state: RoomState, version: number, token: string) {
     ...state,
     version,
     meId: me.id,
+    myReconnectCode: me.reconnectCode ?? '',
+    turnDurationMs: state.turnDurationMs ?? TURN_DURATION_MS,
+    actionLog: state.actionLog ?? [],
     deck: undefined,
-    players: state.players.map(({ token: _token, ...player }) => ({
-      ...player,
-      hole: player.id === me.id || (reveal && !player.folded) ? player.hole : player.hole.map(() => 'XX'),
-    })),
+    players: state.players.map((player) => {
+      const { token: privateToken, reconnectCode: privateReconnectCode, ...safePlayer } = player;
+      void privateToken;
+      void privateReconnectCode;
+      return {
+        ...safePlayer,
+        online: now - (presence[player.id] ?? 0) < 12_000,
+        hole: player.id === me.id || (reveal && !player.folded) ? player.hole : player.hole.map(() => 'XX'),
+      };
+    }),
   };
 }

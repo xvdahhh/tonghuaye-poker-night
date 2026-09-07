@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const rooms = sqliteTable('rooms', {
   code: text('code').primaryKey(),
@@ -8,3 +8,8 @@ export const rooms = sqliteTable('rooms', {
   updatedAt: integer('updated_at').notNull(),
 });
 
+export const roomPresence = sqliteTable('room_presence', {
+  roomCode: text('room_code').notNull().references(() => rooms.code, { onDelete: 'cascade' }),
+  playerId: text('player_id').notNull(),
+  lastSeenAt: integer('last_seen_at').notNull(),
+}, (table) => [primaryKey({ columns: [table.roomCode, table.playerId] })]);
