@@ -1,12 +1,37 @@
-import type { ActionKind, ActionLogEntry, Player, RoomState, Winner } from './types';
+import type { ActionKind, ActionLogEntry, HandHistoryEntry, Player, RoomState, TableSettings, Winner } from './types';
 
 const RANKS = '23456789TJQKA';
 const SUITS = 'shdc';
 const HAND_NAMES = ['高牌', '一对', '两对', '三条', '顺子', '同花', '葫芦', '四条', '同花顺'];
 const RAISE_UNIT = 10;
 export const TURN_DURATION_MS = 30_000;
+export const PRESENCE_ONLINE_MS = 12_000;
+export const HOST_HANDOVER_MS = 18_000;
+export const DEFAULT_TABLE_SETTINGS: TableSettings = {
+  buyIn: 1_000,
+  smallBlind: 10,
+  bigBlind: 20,
+  turnDurationMs: TURN_DURATION_MS,
+};
 const RECONNECT_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ACTIVE_PHASES = ['preflop', 'flop', 'turn', 'river'];
+
+export function normalizeTableSettings(input: Partial<TableSettings> = {}): TableSettings {
+  const buyIn = Number(input.buyIn ?? DEFAULT_TABLE_SETTINGS.buyIn);
+  const bigBlind = Number(input.bigBlind ?? DEFAULT_TABLE_SETTINGS.bigBlind);
+  const turnDurationMs = Number(input.turnDurationMs ?? DEFAULT_TABLE_SETTINGS.turnDurationMs);
+  if (!Number.isInteger(buyIn) || buyIn < 500 || buyIn > 100_000 || buyIn % 100 !== 0) {
+    throw new Error('起始筹码需为 500—100,000 之间的 100 整数倍');
+  }
+  if (!Number.isInteger(bigBlind) || bigBlind < 10 || bigBlind > 1_000 || bigBlind % 10 !== 0) {
+    throw new Error('大盲需为 10—1,000 之间的 10 整数倍');
+  }
+  if (buyIn < bigBlind * 20) throw new Error('起始筹码至少需要 20 个大盲');
+  if (!Number.isInteger(turnDurationMs) || turnDurationMs < 15_000 || turnDurationMs > 120_000 || turnDurationMs % 5_000 !== 0) {
+    throw new Error('行动时间需为 15—120 秒之间的 5 秒整数倍');
+  }
+  return { buyIn, smallBlind: Math.max(5, Math.floor(bigBlind / 2)), bigBlind, turnDurationMs };
+}
 
 export function randomId(length = 20) {
   const bytes = new Uint8Array(length);
@@ -43,11 +68,17 @@ function armTurnTimer(state: RoomState, now = Date.now()) {
 
 export function upgradeRoomState(state: RoomState, now = Date.now()) {
   let changed = false;
+  if (!state.buyIn) { state.buyIn = DEFAULT_TABLE_SETTINGS.buyIn; changed = true; }
   if (!state.turnDurationMs) { state.turnDurationMs = TURN_DURATION_MS; changed = true; }
   if (!state.actionLog) { state.actionLog = []; changed = true; }
+  if (!state.handHistory) { state.handHistory = []; changed = true; }
   state.players.forEach((player) => {
     if (!player.reconnectCode) { player.reconnectCode = uniqueReconnectCode(state); changed = true; }
   });
+  if (ACTIVE_PHASES.includes(state.phase) && !state.handStartedAt) {
+    state.handStartedAt = now;
+    changed = true;
+  }
   if (ACTIVE_PHASES.includes(state.phase) && state.actorIndex >= 0 && !state.turnDeadlineAt) {
     state.turnDeadlineAt = now + state.turnDurationMs;
     changed = true;
@@ -60,11 +91,33 @@ export function upgradeRoomState(state: RoomState, now = Date.now()) {
 }
 
 export function needsRoomMaintenance(state: RoomState, now = Date.now()) {
-  return !state.turnDurationMs
+  return !state.buyIn
+    || !state.turnDurationMs
     || !state.actionLog
+    || !state.handHistory
     || state.players.some((player) => !player.reconnectCode)
     || (ACTIVE_PHASES.includes(state.phase) && state.actorIndex >= 0 && (!state.turnDeadlineAt || state.turnDeadlineAt <= now))
     || (!ACTIVE_PHASES.includes(state.phase) && Boolean(state.turnDeadlineAt));
+}
+
+function isPresent(presence: Record<string, number>, playerId: string, now: number, threshold: number) {
+  return now - (presence[playerId] ?? 0) < threshold;
+}
+
+export function needsHostTransfer(state: RoomState, presence: Record<string, number>, now = Date.now()) {
+  const host = state.players.find((player) => player.id === state.hostId);
+  if (host && !host.leaving && isPresent(presence, host.id, now, HOST_HANDOVER_MS)) return false;
+  return state.players.some((player) => !player.leaving && isPresent(presence, player.id, now, PRESENCE_ONLINE_MS));
+}
+
+export function transferHostIfNeeded(state: RoomState, presence: Record<string, number>, now = Date.now()) {
+  if (!needsHostTransfer(state, presence, now)) return false;
+  const nextHost = state.players.find((player) => !player.leaving && isPresent(presence, player.id, now, PRESENCE_ONLINE_MS));
+  if (!nextHost || nextHost.id === state.hostId) return false;
+  state.hostId = nextHost.id;
+  state.message = `${nextHost.name} 已接任房主`;
+  appendActionLog(state, state.message, now);
+  return true;
 }
 
 export function roomCode() {
@@ -85,16 +138,19 @@ function freshDeck() {
   return cards;
 }
 
-export function newRoom(code: string, name: string) {
+export function newRoom(code: string, name: string, requestedSettings: Partial<TableSettings> = {}) {
+  const settings = normalizeTableSettings(requestedSettings);
   const player: Player = {
-    id: randomId(10), token: randomId(28), reconnectCode: reconnectCode(), name, stack: 1000, hole: [],
-    folded: false, allIn: false, leaving: false, waitingForNextHand: false, bet: 0, totalBet: 0,
+    id: randomId(10), token: randomId(28), reconnectCode: reconnectCode(), name, stack: settings.buyIn, hole: [],
+    folded: false, allIn: false, leaving: false, waitingForNextHand: false,
+    sittingOut: false, sittingOutNextHand: false, bet: 0, totalBet: 0,
   };
   const state: RoomState = {
     code, phase: 'lobby', handNo: 0, hostId: player.id, players: [player], dealerIndex: -1,
-    actorIndex: -1, deck: [], community: [], pot: 0, currentBet: 0, minRaise: 20,
-    smallBlind: 10, bigBlind: 20, pending: [], raiseRights: [], winners: [], message: '等待好友加入牌桌',
-    turnDurationMs: TURN_DURATION_MS, actionLog: [],
+    actorIndex: -1, deck: [], community: [], pot: 0, currentBet: 0, minRaise: settings.bigBlind,
+    buyIn: settings.buyIn, smallBlind: settings.smallBlind, bigBlind: settings.bigBlind,
+    pending: [], raiseRights: [], winners: [], message: '等待好友加入牌桌',
+    turnDurationMs: settings.turnDurationMs, actionLog: [], handHistory: [],
   };
   return { state, player };
 }
@@ -104,13 +160,29 @@ export function joinRoom(state: RoomState, name: string) {
   if (state.players.length >= 6) throw new Error('这张牌桌已经坐满');
   const waitingForNextHand = state.phase !== 'lobby';
   const player: Player = {
-    id: randomId(10), token: randomId(28), reconnectCode: uniqueReconnectCode(state), name, stack: 1000, hole: [],
-    folded: waitingForNextHand, allIn: false, leaving: false, waitingForNextHand, bet: 0, totalBet: 0,
+    id: randomId(10), token: randomId(28), reconnectCode: uniqueReconnectCode(state), name, stack: state.buyIn ?? DEFAULT_TABLE_SETTINGS.buyIn, hole: [],
+    folded: waitingForNextHand, allIn: false, leaving: false, waitingForNextHand,
+    sittingOut: false, sittingOutNextHand: false, bet: 0, totalBet: 0,
   };
   state.players.push(player);
   if (state.phase === 'lobby') state.message = `${player.name} 已入座`;
   else appendActionLog(state, `${player.name} 已入座，将从下一手参战`);
   return player;
+}
+
+export function configureTable(state: RoomState, player: Player, requestedSettings: Partial<TableSettings>, now = Date.now()) {
+  if (player.id !== state.hostId) throw new Error('只有房主可以修改牌桌设置');
+  if (state.phase !== 'lobby' || state.handNo > 0) throw new Error('牌桌设置只能在第一手开始前修改');
+  const settings = normalizeTableSettings(requestedSettings);
+  state.buyIn = settings.buyIn;
+  state.smallBlind = settings.smallBlind;
+  state.bigBlind = settings.bigBlind;
+  state.minRaise = settings.bigBlind;
+  state.turnDurationMs = settings.turnDurationMs;
+  state.players.forEach((candidate) => { candidate.stack = settings.buyIn; });
+  state.message = `牌桌设置已更新：${settings.smallBlind}/${settings.bigBlind}，买入 ${settings.buyIn}`;
+  appendActionLog(state, state.message, now);
+  return settings;
 }
 
 export function reconnectPlayer(state: RoomState, rawCode: string) {
@@ -209,12 +281,49 @@ function cleanupLeavingPlayers(state: RoomState) {
   if (!state.players.some((player) => player.id === state.hostId)) state.hostId = state.players[0]?.id ?? '';
 }
 
+export function setPlayerParticipation(state: RoomState, player: Player, sittingOut: boolean, now = Date.now()) {
+  const activeHand = ACTIVE_PHASES.includes(state.phase);
+  if (activeHand) {
+    if (sittingOut) {
+      if (player.sittingOut || player.waitingForNextHand) {
+        player.sittingOut = true;
+        player.waitingForNextHand = false;
+        player.folded = true;
+        state.message = `${player.name} 正在暂离`;
+      } else {
+        player.sittingOutNextHand = true;
+        state.message = `${player.name} 将从下一手开始暂离`;
+      }
+    } else if (player.sittingOut || player.waitingForNextHand) {
+      player.sittingOut = false;
+      player.sittingOutNextHand = false;
+      player.waitingForNextHand = true;
+      player.folded = true;
+      state.message = `${player.name} 将从下一手回到牌桌`;
+    } else {
+      player.sittingOutNextHand = false;
+      state.message = `${player.name} 已取消下一手暂离`;
+    }
+  } else {
+    player.sittingOut = sittingOut;
+    player.sittingOutNextHand = false;
+    player.waitingForNextHand = false;
+    player.folded = sittingOut || player.stack <= 0;
+    state.message = sittingOut ? `${player.name} 正在暂离` : `${player.name} 已回到牌桌`;
+  }
+  appendActionLog(state, state.message, now);
+}
+
 export function startHand(state: RoomState, now = Date.now()) {
   upgradeRoomState(state, now);
-  cleanupLeavingPlayers(state);
-  const funded = state.players.filter((player) => player.stack > 0);
-  if (funded.length < 2) throw new Error('至少需要两位有筹码的玩家');
   if (state.phase !== 'lobby' && state.phase !== 'showdown') throw new Error('本手牌还没有结束');
+  cleanupLeavingPlayers(state);
+  state.players.forEach((player) => {
+    if (player.sittingOutNextHand) player.sittingOut = true;
+    player.sittingOutNextHand = false;
+  });
+  const funded = state.players.filter((player) => player.stack > 0 && !player.sittingOut && !player.leaving);
+  if (funded.length < 2) throw new Error('至少需要两位有筹码的玩家');
 
   state.handNo += 1;
   state.phase = 'preflop';
@@ -225,9 +334,10 @@ export function startHand(state: RoomState, now = Date.now()) {
   state.minRaise = state.bigBlind;
   state.winners = [];
   state.actionLog = [];
+  state.handStartedAt = now;
   state.players.forEach((player) => {
     player.hole = [];
-    player.folded = player.stack <= 0;
+    player.folded = player.stack <= 0 || Boolean(player.sittingOut);
     player.allIn = false;
     player.waitingForNextHand = false;
     player.bet = 0;
@@ -309,6 +419,30 @@ function bestHand(cards: string[]) {
   return best;
 }
 
+function archiveCompletedHand(state: RoomState, now = Date.now()) {
+  if ((state.handHistory ?? []).some((hand) => hand.handNo === state.handNo)) return;
+  const entry: HandHistoryEntry = {
+    handNo: state.handNo,
+    startedAt: state.handStartedAt ?? now,
+    completedAt: now,
+    dealerId: state.players[state.dealerIndex]?.id ?? '',
+    community: [...state.community],
+    pot: state.pot,
+    players: state.players
+      .filter((player) => player.hole.length > 0 || player.totalBet > 0)
+      .map((player) => ({
+        id: player.id,
+        name: player.name,
+        hole: [...player.hole],
+        folded: player.folded,
+        totalBet: player.totalBet,
+      })),
+    winners: state.winners.map((winner) => ({ ...winner })),
+    actions: (state.actionLog ?? []).map((action) => ({ ...action })),
+  };
+  state.handHistory = [...(state.handHistory ?? []), entry];
+}
+
 function showdown(state: RoomState, now = Date.now()) {
   refundLegacyUncalledTotal(state);
   state.phase = 'showdown';
@@ -356,6 +490,7 @@ function showdown(state: RoomState, now = Date.now()) {
     const name = state.players.find((player) => player.id === winner.playerId)?.name ?? '玩家';
     return `${name} 赢得 ${winner.amount}（${winner.hand}）`;
   }).join('；'), now);
+  archiveCompletedHand(state, now);
   armTurnTimer(state, now);
   cleanupLeavingPlayers(state);
 }
@@ -369,6 +504,7 @@ function uncontested(state: RoomState, winner: Player, now = Date.now()) {
   state.raiseRights = [];
   state.message = `${winner.name} 赢得 ${state.pot} 筹码`;
   appendActionLog(state, `${winner.name} 赢得 ${state.pot}（对手弃牌）`, now);
+  archiveCompletedHand(state, now);
   armTurnTimer(state, now);
   cleanupLeavingPlayers(state);
 }
@@ -537,8 +673,16 @@ export function publicState(
     version,
     meId: me.id,
     myReconnectCode: me.reconnectCode ?? '',
+    buyIn: state.buyIn ?? DEFAULT_TABLE_SETTINGS.buyIn,
     turnDurationMs: state.turnDurationMs ?? TURN_DURATION_MS,
     actionLog: state.actionLog ?? [],
+    handHistory: (state.handHistory ?? []).map((hand) => ({
+      ...hand,
+      players: hand.players.map((player) => ({
+        ...player,
+        hole: player.id === me.id || !player.folded ? player.hole : player.hole.map(() => 'XX'),
+      })),
+    })),
     deck: undefined,
     players: state.players.map((player) => {
       const { token: privateToken, reconnectCode: privateReconnectCode, ...safePlayer } = player;
@@ -546,7 +690,7 @@ export function publicState(
       void privateReconnectCode;
       return {
         ...safePlayer,
-        online: now - (presence[player.id] ?? 0) < 12_000,
+        online: now - (presence[player.id] ?? 0) < PRESENCE_ONLINE_MS,
         hole: player.id === me.id || (reveal && !player.folded) ? player.hole : player.hole.map(() => 'XX'),
       };
     }),

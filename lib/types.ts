@@ -9,6 +9,33 @@ export type ActionLogEntry = {
   text: string;
 };
 
+export type TableSettings = {
+  buyIn: number;
+  smallBlind: number;
+  bigBlind: number;
+  turnDurationMs: number;
+};
+
+export type HandHistoryPlayer = {
+  id: string;
+  name: string;
+  hole: string[];
+  folded: boolean;
+  totalBet: number;
+};
+
+export type HandHistoryEntry = {
+  handNo: number;
+  startedAt: number;
+  completedAt: number;
+  dealerId: string;
+  community: string[];
+  pot: number;
+  players: HandHistoryPlayer[];
+  winners: Winner[];
+  actions: ActionLogEntry[];
+};
+
 export type Player = {
   id: string;
   token: string;
@@ -20,6 +47,8 @@ export type Player = {
   allIn: boolean;
   leaving?: boolean;
   waitingForNextHand?: boolean;
+  sittingOut?: boolean;
+  sittingOutNextHand?: boolean;
   bet: number;
   totalBet: number;
 };
@@ -43,6 +72,7 @@ export type RoomState = {
   pot: number;
   currentBet: number;
   minRaise: number;
+  buyIn?: number;
   smallBlind: number;
   bigBlind: number;
   pending: string[];
@@ -52,6 +82,8 @@ export type RoomState = {
   turnDurationMs?: number;
   turnDeadlineAt?: number;
   actionLog?: ActionLogEntry[];
+  handStartedAt?: number;
+  handHistory?: HandHistoryEntry[];
 };
 
 export type ClientPlayer = Omit<Player, 'token' | 'reconnectCode'> & {
@@ -63,7 +95,9 @@ export type ClientRoom = Omit<RoomState, 'deck' | 'players'> & {
   version: number;
   meId: string;
   myReconnectCode: string;
+  buyIn: number;
   turnDurationMs: number;
   turnDeadlineAt?: number;
   actionLog: ActionLogEntry[];
+  handHistory: HandHistoryEntry[];
 };

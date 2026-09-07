@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { insertRoom, mutateRoom, readPresence, touchPresence } from '@/lib/db';
 import { joinRoom, newRoom, publicState, reconnectPlayer, roomCode, upgradeRoomState } from '@/lib/poker';
+import type { TableSettings } from '@/lib/types';
 
 function cleanName(value: unknown) {
   const name = String(value ?? '').trim().replace(/[<>]/g, '').slice(0, 12);
@@ -10,7 +11,13 @@ function cleanName(value: unknown) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action?: string; name?: string; code?: string; reconnectCode?: string };
+    const body = await request.json() as {
+      action?: string;
+      name?: string;
+      code?: string;
+      reconnectCode?: string;
+      settings?: Partial<TableSettings>;
+    };
     const now = Date.now();
     const requestedCode = String(body.code ?? '').trim().toUpperCase();
     if (body.action === 'reconnect') {
@@ -36,7 +43,7 @@ export async function POST(request: Request) {
     if (body.action === 'create') {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const code = roomCode();
-        const created = newRoom(code, name);
+        const created = newRoom(code, name, body.settings);
         try {
           await insertRoom(created.state);
           await touchPresence(code, created.player.id, now);

@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { act, applyTurnTimeout, joinRoom, leaveRoom, newRoom, publicState, reconnectPlayer, startHand, upgradeRoomState } from '../lib/poker.ts';
+import {
+  act,
+  applyTurnTimeout,
+  configureTable,
+  joinRoom,
+  leaveRoom,
+  newRoom,
+  publicState,
+  reconnectPlayer,
+  setPlayerParticipation,
+  startHand,
+  transferHostIfNeeded,
+  upgradeRoomState,
+} from '../lib/poker.ts';
 import type { Player, RoomState } from '../lib/types.ts';
 
 const BOARD = ['2s', '3h', '7d', '9c', 'Jc'];
@@ -427,4 +440,78 @@ test('多种投入与弃牌组合始终保持筹码守恒', () => {
   }
 
   assert.equal(checked, 441);
+});
+
+test('房主离线后自动把房主身份交给仍在线的玩家', () => {
+  const created = newRoom('ABC234', 'A');
+  const guest = joinRoom(created.state, 'B');
+  const now = 100_000;
+
+  assert.equal(transferHostIfNeeded(created.state, { [created.player.id]: now - 20_000, [guest.id]: now }, now), true);
+  assert.equal(created.state.hostId, guest.id);
+  assert.equal(created.state.actionLog?.at(-1)?.text, 'B 已接任房主');
+});
+
+test('房主可在第一手前配置买入、盲注和行动时间', () => {
+  const created = newRoom('ABC234', 'A');
+  const guest = joinRoom(created.state, 'B');
+
+  configureTable(created.state, created.player, {
+    buyIn: 5_000,
+    bigBlind: 100,
+    turnDurationMs: 45_000,
+  }, 1_000);
+
+  assert.equal(created.state.buyIn, 5_000);
+  assert.equal(created.state.smallBlind, 50);
+  assert.equal(created.state.bigBlind, 100);
+  assert.equal(created.state.turnDurationMs, 45_000);
+  assert.deepEqual(created.state.players.map((candidate) => candidate.stack), [5_000, 5_000]);
+
+  startHand(created.state, 2_000);
+  assert.throws(() => configureTable(created.state, guest, { buyIn: 1_000 }), /只有房主/);
+  assert.throws(() => configureTable(created.state, created.player, { buyIn: 1_000 }), /第一手开始前/);
+});
+
+test('玩家可以暂离，并选择从下一手回到牌桌', () => {
+  const created = newRoom('ABC234', 'A');
+  const guest = joinRoom(created.state, 'B');
+  joinRoom(created.state, 'C');
+
+  setPlayerParticipation(created.state, guest, true, 1_000);
+  startHand(created.state, 2_000);
+
+  assert.equal(guest.sittingOut, true);
+  assert.equal(guest.hole.length, 0);
+  assert.equal(guest.folded, true);
+
+  setPlayerParticipation(created.state, guest, false, 2_100);
+  assert.equal(guest.waitingForNextHand, true);
+  created.state.phase = 'showdown';
+  created.state.actorIndex = -1;
+  created.state.pending = [];
+  startHand(created.state, 3_000);
+
+  assert.equal(guest.sittingOut, false);
+  assert.equal(guest.waitingForNextHand, false);
+  assert.equal(guest.hole.length, 2);
+});
+
+test('完成的每一手都会保留在整场历史中并隐藏弃牌者底牌', () => {
+  const created = newRoom('ABC234', 'A');
+  joinRoom(created.state, 'B');
+  startHand(created.state, 1_000);
+  const actor = created.state.players[created.state.actorIndex];
+  const viewer = created.state.players.find((candidate) => candidate.id !== actor.id)!;
+
+  act(created.state, actor, 'fold', undefined, { now: 1_100 });
+
+  assert.equal(created.state.handHistory?.length, 1);
+  assert.equal(created.state.handHistory?.[0].actions.at(-1)?.text.includes('赢得'), true);
+  const view = publicState(created.state, 2, viewer.token, { [viewer.id]: 1_100 }, 1_100);
+  assert.deepEqual(view.handHistory[0].players.find((candidate) => candidate.id === actor.id)?.hole, ['XX', 'XX']);
+
+  startHand(created.state, 2_000);
+  assert.equal(created.state.handHistory?.length, 1);
+  assert.equal(created.state.actionLog?.[0].text, '第 2 手开始');
 });
