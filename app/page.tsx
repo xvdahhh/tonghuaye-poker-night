@@ -1,11 +1,12 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ActionKind, ClientPlayer, ClientRoom } from '@/lib/types';
+import type { ActionKind, ClientPlayer, ClientRoom, TableSettings } from '@/lib/types';
 import { reconcileSeatOrder, rotateSeatOrderForHand, seatOrderForPlayers } from '@/lib/seats';
 
 const SUITS: Record<string, string> = { s: '♠', h: '♥', d: '♦', c: '♣' };
 const RAISE_UNIT = 10;
+type RoomAction = ActionKind | 'start' | 'rebuy' | 'configure' | 'sitout' | 'return';
 
 function Card({ value, small = false }: { value: string; small?: boolean }) {
   if (value === 'XX') return <span className={`playing-card back ${small ? 'small' : ''}`} aria-label="暗牌" />;
@@ -16,7 +17,7 @@ function Card({ value, small = false }: { value: string; small?: boolean }) {
 }
 
 function Landing({ onEnter, onReconnect }: {
-  onEnter: (mode: 'create' | 'join', name: string, code?: string) => Promise<void>;
+  onEnter: (mode: 'create' | 'join', name: string, code?: string, settings?: TableSettings) => Promise<void>;
   onReconnect: (code: string, reconnectCode: string) => Promise<void>;
 }) {
   const [name, setName] = useState('');
@@ -26,6 +27,9 @@ function Landing({ onEnter, onReconnect }: {
   const [reconnectCode, setReconnectCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [buyIn, setBuyIn] = useState(1_000);
+  const [bigBlind, setBigBlind] = useState(20);
+  const [turnSeconds, setTurnSeconds] = useState(30);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -41,7 +45,10 @@ function Landing({ onEnter, onReconnect }: {
     if (!name.trim()) { setError('先给自己取个昵称'); return; }
     if (mode === 'join' && code.trim().length !== 6) { setError('房间码是 6 位'); return; }
     setBusy(true); setError('');
-    try { await onEnter(mode, name.trim(), code.trim().toUpperCase()); }
+    const settings = mode === 'create'
+      ? { buyIn, smallBlind: bigBlind / 2, bigBlind, turnDurationMs: turnSeconds * 1_000 }
+      : undefined;
+    try { await onEnter(mode, name.trim(), code.trim().toUpperCase(), settings); }
     catch (caught) { setError(caught instanceof Error ? caught.message : '没能进入牌桌'); setBusy(false); }
   }
 
@@ -69,6 +76,14 @@ function Landing({ onEnter, onReconnect }: {
         <div className="entry-card">
           <form className="entry-form" onSubmit={(event) => submit('create', event)}>
             <label>你的昵称<input value={name} maxLength={12} onChange={(event) => setName(event.target.value)} placeholder="例如：小林" autoComplete="nickname" /></label>
+            <details className="create-settings">
+              <summary><span>牌桌设置</span><small>{buyIn.toLocaleString()} 筹码 · {bigBlind / 2}/{bigBlind} · {turnSeconds} 秒</small></summary>
+              <div className="settings-grid">
+                <label>起始筹码<select value={buyIn} onChange={(event) => setBuyIn(Number(event.target.value))}><option value={500} disabled={500 < bigBlind * 20}>500</option><option value={1000} disabled={1000 < bigBlind * 20}>1,000</option><option value={2000} disabled={2000 < bigBlind * 20}>2,000</option><option value={5000}>5,000</option><option value={10000}>10,000</option><option value={20000}>20,000</option></select></label>
+                <label>盲注<select value={bigBlind} onChange={(event) => { const next = Number(event.target.value); setBigBlind(next); setBuyIn((current) => current >= next * 20 ? current : next <= 50 ? 1000 : next <= 100 ? 2000 : 5000); }}><option value={20}>10 / 20</option><option value={50}>25 / 50</option><option value={100}>50 / 100</option><option value={200}>100 / 200</option></select></label>
+                <label>行动时间<select value={turnSeconds} onChange={(event) => setTurnSeconds(Number(event.target.value))}><option value={15}>15 秒</option><option value={30}>30 秒</option><option value={45}>45 秒</option><option value={60}>60 秒</option></select></label>
+              </div>
+            </details>
             <button className="primary-action" disabled={busy}>创建牌桌 <span>→</span></button>
           </form>
           <div className="entry-divider"><span>或</span></div>
@@ -117,7 +132,7 @@ function PlayerSeat({ player, position, room }: { player: ClientPlayer; position
       <div className="player-meta"><b>{isMe ? `${player.name}（你）` : player.name}</b><span><i className={`presence-dot ${player.online ? 'online' : ''}`} aria-label={player.online ? '在线' : '离线'} />{player.stack.toLocaleString()} 筹码</span></div>
       {isDealer && <span className="dealer-badge">D</span>}
       {player.allIn && !player.leaving && <span className="state-badge">ALL IN</span>}
-      {player.leaving ? <span className="state-badge">已退出</span> : player.waitingForNextHand ? <span className="state-badge waiting-badge">下手参战</span> : player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
+      {player.leaving ? <span className="state-badge">已退出</span> : player.sittingOut ? <span className="state-badge waiting-badge">暂离</span> : player.sittingOutNextHand ? <span className="state-badge waiting-badge">下手暂离</span> : player.waitingForNextHand ? <span className="state-badge waiting-badge">下手参战</span> : player.folded && room.phase !== 'lobby' && <span className="state-badge">已弃牌</span>}
       {player.bet > 0 && <span className="seat-bet">{player.bet}</span>}
       {!!player.hole.length && <div className="seat-cards">{player.hole.map((card, index) => <Card key={`${card}-${index}`} value={card} small={!isMe} />)}</div>}
       {winner && <div className="winner-pop">+{winner.amount} · {winner.hand}</div>}
@@ -127,7 +142,7 @@ function PlayerSeat({ player, position, room }: { player: ClientPlayer; position
 
 function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
   room: ClientRoom;
-  onAction: (action: ActionKind | 'start' | 'rebuy', amount?: number) => Promise<void>;
+  onAction: (action: RoomAction, amount?: number, settings?: TableSettings) => Promise<boolean>;
   onLeave: () => Promise<void>;
   busy: boolean;
   toast: (message: string) => void;
@@ -137,6 +152,14 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
   const playerIdSignature = room.players.map((player) => player.id).sort().join('|');
   const [seatOrder, setSeatOrder] = useState(() => seatOrderForPlayers(room.players, room.meId));
   const [showInfo, setShowInfo] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [historyMode, setHistoryMode] = useState<'current' | 'history'>('current');
+  const [settingsDraft, setSettingsDraft] = useState<TableSettings>(() => ({
+    buyIn: room.buyIn,
+    smallBlind: room.smallBlind,
+    bigBlind: room.bigBlind,
+    turnDurationMs: room.turnDurationMs,
+  }));
   const [clockNow, setClockNow] = useState(0);
   const previousHandNo = useRef(room.handNo);
   const orderedPlayers = useMemo(() => {
@@ -150,7 +173,7 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
   }, [room.players, seatOrder]);
   const isHost = room.hostId === room.meId;
   const isTurn = room.players[room.actorIndex]?.id === room.meId;
-  const fundedPlayers = room.players.filter((player) => player.stack > 0).length;
+  const fundedPlayers = room.players.filter((player) => player.stack > 0 && !player.sittingOut && !player.sittingOutNextHand && !player.leaving).length;
   const toCall = Math.max(0, room.currentBet - me.bet);
   const canRaise = room.raiseRights?.includes(me.id) ?? room.pending.includes(me.id);
   const maximumTarget = me.bet + me.stack;
@@ -183,6 +206,12 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
     return () => window.clearTimeout(timer);
   }, [minTarget, room.version]);
   useEffect(() => {
+    const timer = window.setTimeout(() => setSettingsDraft({
+      buyIn: room.buyIn, smallBlind: room.smallBlind, bigBlind: room.bigBlind, turnDurationMs: room.turnDurationMs,
+    }), 0);
+    return () => window.clearTimeout(timer);
+  }, [room.buyIn, room.smallBlind, room.bigBlind, room.turnDurationMs]);
+  useEffect(() => {
     const timer = window.setInterval(() => setClockNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, []);
@@ -204,6 +233,9 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
     } catch { /* share sheet cancelled */ }
   }
 
+  const participationAction: RoomAction = me.sittingOut || me.sittingOutNextHand ? 'return' : 'sitout';
+  const participationLabel = me.sittingOut ? '下一手回桌' : me.sittingOutNextHand ? '取消暂离' : room.phase === 'lobby' || room.phase === 'showdown' ? '暂离' : '下手暂离';
+
   return (
     <main className="game-shell">
       <nav className="game-topbar">
@@ -211,20 +243,22 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
         <div className="room-tools">
           <button className="room-code" onClick={() => { navigator.clipboard.writeText(room.code); toast('房间码已复制'); }} aria-label="复制房间码">房间 <b>{room.code}</b> <span>复制</span></button>
           <button className="invite-button" onClick={invite}>邀请好友</button>
+          {isHost && room.phase === 'lobby' && room.handNo === 0 && <button className="settings-button" onClick={() => setShowSettings(true)}>牌桌设置</button>}
+          <button className="participation-button" disabled={busy} onClick={() => onAction(participationAction)}>{participationLabel}</button>
           <button className="info-button" onClick={() => setShowInfo(true)}>牌局记录</button>
           <button className="exit-button" disabled={busy} onClick={onLeave} aria-label="退出房间">退出</button>
         </div>
       </nav>
 
       <section className="game-area">
-        <div className="game-status"><span className={`sync-dot ${connectionState}`} /> {connectionState === 'reconnecting' ? '连接中断，正在重连…' : me.waitingForNextHand ? '已入座，下一手开始参战' : room.phase === 'lobby' ? '等待开局' : room.message}</div>
+        <div className="game-status"><span className={`sync-dot ${connectionState}`} /> {connectionState === 'reconnecting' ? '连接中断，正在重连…' : me.sittingOut ? '正在暂离，点击“下一手回桌”即可回来' : me.sittingOutNextHand ? '本手结束后开始暂离' : me.waitingForNextHand ? '已入座，下一手开始参战' : room.phase === 'lobby' ? '等待开局' : room.message}</div>
         <div className="felt game-felt">
           <div className="felt-ring" />
           {room.phase === 'lobby' ? (
             <div className="lobby-center">
               <span className="lobby-label">PRIVATE TABLE</span>
-              <h2>{room.players.length} / 6 位玩家已入座</h2>
-              <p>把房间码 <b>{room.code}</b> 发给好友</p>
+              <h2>{fundedPlayers} 位玩家准备参战</h2>
+              <p>{room.players.length} / 6 已入座 · 盲注 {room.smallBlind}/{room.bigBlind} · {room.turnDurationMs / 1_000} 秒</p>
               {isHost ? <button disabled={busy || room.players.length < 2} onClick={() => onAction('start')}>{room.players.length < 2 ? '再等一位好友' : '开始牌局'}</button> : <span className="waiting-host">等待房主开始…</span>}
             </div>
           ) : (
@@ -236,8 +270,8 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
               </div>
               <p>{me.waitingForNextHand ? '你可以观看当前牌局，下一手会自动发牌' : room.phase === 'showdown' ? room.message : isTurn ? `轮到你行动 · ${turnSeconds} 秒` : `等待 ${room.players[room.actorIndex]?.name ?? '玩家'} · ${turnSeconds} 秒`}</p>
               {room.phase === 'showdown' && <div className="showdown-actions">
-                {me.stack === 0 && <button className="rebuy-button" disabled={busy} onClick={() => onAction('rebuy')}>补充 1,000 筹码</button>}
-                {isHost && <button className="next-hand" disabled={busy || fundedPlayers < 2} onClick={() => onAction('start')}>{fundedPlayers < 2 ? '等待玩家补充筹码' : '开始下一手'}</button>}
+                {me.stack === 0 && <button className="rebuy-button" disabled={busy} onClick={() => onAction('rebuy')}>补充 {room.buyIn.toLocaleString()} 筹码</button>}
+                {isHost && <button className="next-hand" disabled={busy || fundedPlayers < 2} onClick={() => onAction('start')}>{fundedPlayers < 2 ? '等待至少两位玩家' : '开始下一手'}</button>}
               </div>}
             </div>
           )}
@@ -269,12 +303,45 @@ function GameTable({ room, onAction, onLeave, busy, toast, connectionState }: {
             <div><span>跨设备恢复座位</span><code>{room.myReconnectCode}</code></div>
             <button onClick={() => { navigator.clipboard.writeText(room.myReconnectCode); toast('重连码已复制，请妥善保存'); }}>复制重连码</button>
           </div>
-          <ol className="action-log">
-            {room.actionLog.length ? [...room.actionLog].reverse().map((entry) => (
-              <li key={entry.id}><time>{new Date(entry.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time><span>{entry.text}</span></li>
-            )) : <li className="empty-log">本手还没有操作记录</li>}
-          </ol>
+          <div className="history-tabs" role="tablist" aria-label="牌局记录范围">
+            <button className={historyMode === 'current' ? 'active' : ''} onClick={() => setHistoryMode('current')}>本手</button>
+            <button className={historyMode === 'history' ? 'active' : ''} onClick={() => setHistoryMode('history')}>历史 {room.handHistory.length}</button>
+          </div>
+          {historyMode === 'current' ? (
+            <ol className="action-log">
+              {room.actionLog.length ? [...room.actionLog].reverse().map((entry) => (
+                <li key={entry.id}><time>{new Date(entry.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time><span>{entry.text}</span></li>
+              )) : <li className="empty-log">本手还没有操作记录</li>}
+            </ol>
+          ) : (
+            <div className="hand-history">
+              {room.handHistory.length ? [...room.handHistory].reverse().map((hand) => (
+                <details key={hand.handNo} className="history-hand">
+                  <summary><span><b>第 {hand.handNo} 手</b><small>{new Date(hand.completedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</small></span><strong>{hand.winners.map((winner) => `${hand.players.find((player) => player.id === winner.playerId)?.name ?? '玩家'} +${winner.amount}`).join(' · ')}</strong></summary>
+                  <div className="history-board"><span>公共牌</span><div>{hand.community.map((card, index) => <Card key={`${card}-${index}`} value={card} small />)}</div><b>底池 {hand.pot.toLocaleString()}</b></div>
+                  <div className="history-players">
+                    {hand.players.map((player) => <div key={player.id}><span>{player.name}{player.id === hand.dealerId ? ' · D' : ''}</span><div>{player.hole.map((card, index) => <Card key={`${card}-${index}`} value={card} small />)}</div><small>{player.folded ? '已弃牌' : `投入 ${player.totalBet}`}</small></div>)}
+                  </div>
+                  <ol className="action-log compact">{hand.actions.map((entry) => <li key={entry.id}><time>{new Date(entry.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</time><span>{entry.text}</span></li>)}</ol>
+                </details>
+              )) : <p className="empty-log">完成第一手后，这里会保留整场历史</p>}
+            </div>
+          )}
         </aside>
+      )}
+      {showSettings && (
+        <div className="settings-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowSettings(false); }}>
+          <section className="table-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="table-settings-title">
+            <div className="info-panel-header"><div><span>BEFORE HAND 1</span><h2 id="table-settings-title">牌桌设置</h2></div><button onClick={() => setShowSettings(false)} aria-label="关闭牌桌设置">×</button></div>
+            <p>设置会应用到已经入座的所有玩家，第一手开始后锁定。</p>
+            <div className="dialog-settings-grid">
+              <label>起始筹码<select value={settingsDraft.buyIn} onChange={(event) => setSettingsDraft((current) => ({ ...current, buyIn: Number(event.target.value) }))}><option value={500} disabled={500 < settingsDraft.bigBlind * 20}>500</option><option value={1000} disabled={1000 < settingsDraft.bigBlind * 20}>1,000</option><option value={2000} disabled={2000 < settingsDraft.bigBlind * 20}>2,000</option><option value={5000}>5,000</option><option value={10000}>10,000</option><option value={20000}>20,000</option></select></label>
+              <label>盲注<select value={settingsDraft.bigBlind} onChange={(event) => { const bigBlind = Number(event.target.value); setSettingsDraft((current) => ({ ...current, bigBlind, smallBlind: bigBlind / 2, buyIn: current.buyIn >= bigBlind * 20 ? current.buyIn : bigBlind <= 50 ? 1000 : bigBlind <= 100 ? 2000 : 5000 })); }}><option value={20}>10 / 20</option><option value={50}>25 / 50</option><option value={100}>50 / 100</option><option value={200}>100 / 200</option></select></label>
+              <label>行动时间<select value={settingsDraft.turnDurationMs} onChange={(event) => setSettingsDraft((current) => ({ ...current, turnDurationMs: Number(event.target.value) }))}><option value={15000}>15 秒</option><option value={30000}>30 秒</option><option value={45000}>45 秒</option><option value={60000}>60 秒</option></select></label>
+            </div>
+            <div className="dialog-actions"><button className="secondary-action" onClick={() => setShowSettings(false)}>取消</button><button className="primary-action" disabled={busy} onClick={async () => { if (await onAction('configure', undefined, settingsDraft)) setShowSettings(false); }}>保存设置</button></div>
+          </section>
+        </div>
       )}
       <p className="fair-note">仅供好友休闲娱乐 · 不涉及真钱交易</p>
     </main>
@@ -328,10 +395,10 @@ export default function Home() {
     return () => window.clearInterval(timer);
   }, [activeRoomCode, token, fetchRoom]);
 
-  async function enter(mode: 'create' | 'join', name: string, code?: string) {
+  async function enter(mode: 'create' | 'join', name: string, code?: string, settings?: TableSettings) {
     const response = await fetch('/api/rooms', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: mode, name, code }),
+      body: JSON.stringify({ action: mode, name, code, settings }),
     });
     const data = await response.json() as { error?: string; token?: string; room?: ClientRoom };
     if (!response.ok || !data.room || !data.token) throw new Error(data.error ?? '没能进入牌桌');
@@ -355,18 +422,19 @@ export default function Home() {
     setToken(data.token); setRoom(data.room); setConnectionState('connected');
   }
 
-  async function action(kind: ActionKind | 'start' | 'rebuy', amount?: number) {
-    if (!room) return;
+  async function action(kind: RoomAction, amount?: number, settings?: TableSettings) {
+    if (!room) return false;
     setBusy(true);
     try {
       const response = await fetch(`/api/rooms/${room.code}`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-player-token': token },
-        body: JSON.stringify({ action: kind, amount }),
+        body: JSON.stringify({ action: kind, amount, settings }),
       });
       const data = await response.json() as { error?: string; room?: ClientRoom };
       if (!response.ok || !data.room) throw new Error(data.error ?? '操作失败');
       setRoom(data.room);
-    } catch (error) { toast(error instanceof Error ? error.message : '操作失败'); }
+      return true;
+    } catch (error) { toast(error instanceof Error ? error.message : '操作失败'); return false; }
     finally { setBusy(false); }
   }
 
