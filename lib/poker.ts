@@ -426,4 +426,3 @@ export function publicState(state: RoomState, version: number, token: string) {
     })),
   };
 }
-
