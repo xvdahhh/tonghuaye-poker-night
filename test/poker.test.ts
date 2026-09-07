@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { act, joinRoom, leaveRoom, startHand } from '../lib/poker.ts';
+import { act, applyTurnTimeout, joinRoom, leaveRoom, newRoom, publicState, reconnectPlayer, startHand, upgradeRoomState } from '../lib/poker.ts';
 import type { Player, RoomState } from '../lib/types.ts';
 
 const BOARD = ['2s', '3h', '7d', '9c', 'Jc'];
@@ -301,6 +301,92 @@ test('等待下手的新玩家退出时立即释放座位', () => {
   leaveRoom(state, newcomer);
 
   assert.equal(state.players.some((candidate) => candidate.id === newcomer.id), false);
+});
+
+test('行动倒计时结束后，需要跟注的玩家自动弃牌并推进牌局', () => {
+  const players = [
+    player('A', ['As', 'Ad'], 100, { stack: 900 }),
+    player('B', ['Kh', 'Kd'], 50, { stack: 950 }),
+    player('C', ['Qh', 'Qd'], 100, { stack: 900 }),
+  ];
+  const state = room(players, {
+    phase: 'preflop',
+    actorIndex: 1,
+    deck: ['2s', '3h', '7d'],
+    community: [],
+    currentBet: 100,
+    pending: ['B'],
+    raiseRights: ['B'],
+    turnDurationMs: 30_000,
+    turnDeadlineAt: 100,
+    actionLog: [],
+  });
+
+  assert.equal(applyTurnTimeout(state, 101), true);
+
+  assert.equal(players[1].folded, true);
+  assert.equal(state.phase, 'flop');
+  assert.equal(state.actionLog?.some((entry) => entry.text === 'B 超时弃牌'), true);
+  assert.equal(state.turnDeadlineAt, 30_101);
+});
+
+test('没有跟注压力时，行动超时会自动过牌', () => {
+  const players = [
+    player('A', ['As', 'Ad'], 0, { stack: 1000, bet: 0 }),
+    player('B', ['Kh', 'Kd'], 0, { stack: 1000, bet: 0 }),
+  ];
+  const state = room(players, {
+    phase: 'flop', actorIndex: 0, community: ['2s', '3h', '7d'], deck: ['9c'],
+    currentBet: 0, pending: ['A', 'B'], raiseRights: ['A', 'B'],
+    turnDurationMs: 30_000, turnDeadlineAt: 500, actionLog: [],
+  });
+
+  applyTurnTimeout(state, 501);
+
+  assert.equal(state.players[state.actorIndex].id, 'B');
+  assert.equal(state.actionLog?.at(-1)?.text, 'A 超时自动过牌');
+  assert.equal(state.turnDeadlineAt, 30_501);
+});
+
+test('重连码可以在新设备恢复同一座位，并轮换旧设备凭证', () => {
+  const created = newRoom('ABC234', 'A');
+  const guest = joinRoom(created.state, 'B');
+  guest.stack = 777;
+  const oldToken = guest.token;
+  const recovery = guest.reconnectCode!;
+
+  const recovered = reconnectPlayer(created.state, recovery.toLowerCase());
+  const view = publicState(created.state, 2, recovered.token, {
+    [created.player.id]: 900,
+    [guest.id]: 995,
+  }, 1_000);
+
+  assert.equal(recovered.id, guest.id);
+  assert.equal(recovered.stack, 777);
+  assert.notEqual(recovered.token, oldToken);
+  assert.equal(view.myReconnectCode, recovery);
+  assert.equal(view.players.find((candidate) => candidate.id === guest.id)?.online, true);
+  assert.equal(view.players.find((candidate) => candidate.id === created.player.id)?.online, true);
+  assert.equal('token' in view.players[0], false);
+  assert.equal('reconnectCode' in view.players[0], false);
+});
+
+test('旧房间会补齐重连码、操作记录和行动倒计时', () => {
+  const players = [
+    player('A', ['As', 'Ad'], 20, { stack: 980 }),
+    player('B', ['Kh', 'Kd'], 20, { stack: 980 }),
+  ];
+  const state = room(players, {
+    phase: 'turn', actorIndex: 0, community: ['2s', '3h', '7d', '9c'],
+    pending: ['A', 'B'], raiseRights: ['A', 'B'], actionLog: undefined,
+    turnDurationMs: undefined, turnDeadlineAt: undefined,
+  });
+
+  assert.equal(upgradeRoomState(state, 2_000), true);
+  assert.equal(state.players.every((candidate) => candidate.reconnectCode?.length === 12), true);
+  assert.deepEqual(state.actionLog, []);
+  assert.equal(state.turnDurationMs, 30_000);
+  assert.equal(state.turnDeadlineAt, 32_000);
 });
 
 test('多种投入与弃牌组合始终保持筹码守恒', () => {
