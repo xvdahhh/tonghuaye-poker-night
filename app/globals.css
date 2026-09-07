@@ -73,8 +73,10 @@ footer { width:min(1120px,100%); margin:36px auto 0; border-top:1px solid var(--
 .player-meta { display:flex; flex-direction:column; gap:4px; min-width:76px; }.player-meta b { font-size:11px; white-space:nowrap; }.player-meta span { color:#94a39b; font:10px/1 monospace; }
 .player-seat.is-me { border-color:rgba(217,255,104,.5); }.player-seat.is-me .player-avatar { color:#10251e; background:var(--lime); }.player-seat.is-actor { box-shadow:0 0 0 2px var(--lime),0 12px 30px rgba(0,0,0,.45); }
 .player-seat.is-actor:after { content:"行动中"; position:absolute; top:-18px; left:50%; transform:translateX(-50%); color:var(--lime); font:8px/1 monospace; letter-spacing:.12em; }.player-seat.is-folded { opacity:.48; filter:saturate(.4); }
+.player-seat.is-waiting { border-color:rgba(210,255,63,.42); }
 .dealer-badge { position:absolute; left:-10px; bottom:-10px; width:23px; height:23px; border-radius:50%; display:grid; place-items:center; color:#17342c; background:#f3ede1; font:bold 9px Arial; box-shadow:0 3px 8px rgba(0,0,0,.3); }
 .state-badge { position:absolute; right:-7px; top:-9px; background:#253e36; color:#bdc9c2; border:1px solid var(--line); padding:3px 6px; font:7px/1 monospace; letter-spacing:.08em; }
+.waiting-badge { background:#2b3c16; color:var(--lime); border-color:rgba(210,255,63,.38); }
 .seat-bet { position:absolute; color:var(--lime); background:#15382d; border:1px solid rgba(217,255,104,.22); padding:3px 8px; border-radius:20px; font:bold 9px monospace; }
 .seat-cards { position:absolute; display:flex; gap:3px; z-index:-1; }.seat-cards .playing-card:nth-child(2) { transform:rotate(4deg); }.winner-pop { position:absolute; left:50%; bottom:-26px; transform:translateX(-50%); white-space:nowrap; color:#10251e; background:var(--lime); padding:5px 9px; font:bold 9px Arial; box-shadow:0 5px 15px rgba(0,0,0,.3); }
 .seat-pos-0 { left:50%; top:91%; }.seat-pos-1 { left:14%; top:74%; }.seat-pos-2 { left:16%; top:23%; }.seat-pos-3 { left:50%; top:8%; }.seat-pos-4 { left:84%; top:23%; }.seat-pos-5 { left:86%; top:74%; }
