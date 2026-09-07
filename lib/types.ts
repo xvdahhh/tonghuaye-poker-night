@@ -50,4 +50,3 @@ export type ClientRoom = Omit<RoomState, 'deck' | 'players'> & {
   version: number;
   meId: string;
 };
-
