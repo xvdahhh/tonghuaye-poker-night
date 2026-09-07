@@ -32,7 +32,7 @@ function freshDeck() {
 export function newRoom(code: string, name: string) {
   const player: Player = {
     id: randomId(10), token: randomId(28), name, stack: 1000, hole: [],
-    folded: false, allIn: false, leaving: false, bet: 0, totalBet: 0,
+    folded: false, allIn: false, leaving: false, waitingForNextHand: false, bet: 0, totalBet: 0,
   };
   const state: RoomState = {
     code, phase: 'lobby', handNo: 0, hostId: player.id, players: [player], dealerIndex: -1,
@@ -43,14 +43,14 @@ export function newRoom(code: string, name: string) {
 }
 
 export function joinRoom(state: RoomState, name: string) {
-  if (state.phase !== 'lobby') throw new Error('牌局已经开始');
   if (state.players.length >= 6) throw new Error('这张牌桌已经坐满');
+  const waitingForNextHand = state.phase !== 'lobby';
   const player: Player = {
     id: randomId(10), token: randomId(28), name, stack: 1000, hole: [],
-    folded: false, allIn: false, leaving: false, bet: 0, totalBet: 0,
+    folded: waitingForNextHand, allIn: false, leaving: false, waitingForNextHand, bet: 0, totalBet: 0,
   };
   state.players.push(player);
-  state.message = `${player.name} 已入座`;
+  if (state.phase === 'lobby') state.message = `${player.name} 已入座`;
   return player;
 }
 
@@ -159,6 +159,7 @@ export function startHand(state: RoomState) {
     player.hole = [];
     player.folded = player.stack <= 0;
     player.allIn = false;
+    player.waitingForNextHand = false;
     player.bet = 0;
     player.totalBet = 0;
   });
@@ -302,7 +303,7 @@ function removePlayer(state: RoomState, player: Player) {
 }
 
 export function leaveRoom(state: RoomState, player: Player) {
-  if (state.phase === 'lobby' || state.phase === 'showdown') {
+  if (state.phase === 'lobby' || state.phase === 'showdown' || player.waitingForNextHand) {
     removePlayer(state, player);
     return;
   }
