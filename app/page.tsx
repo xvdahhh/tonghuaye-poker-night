@@ -303,4 +303,3 @@ export default function Home() {
 
   return <>{room ? <GameTable room={room} onAction={action} onLeave={leave} busy={busy} toast={toast} /> : <Landing onEnter={enter} />}{notice && <div className="toast" role="status">{notice}</div>}</>;
 }
-
